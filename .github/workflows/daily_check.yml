@@ -11,10 +11,7 @@ permissions:
 jobs:
   check:
     name: Check ${{ matrix.country }}
-    runs-on:
-      - self-hosted
-      - linux
-      - ${{ matrix.country }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
