@@ -1,0 +1,203 @@
+name: Daily Domain Check
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check ${{ matrix.country }}
+    runs-on:
+      - self-hosted
+      - linux
+      - ${{ matrix.country }}
+    strategy:
+      fail-fast: false
+      matrix:
+        country: [my, sg, th, np]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run country check
+        run: |
+          mkdir -p out
+          python3 scripts/check_domains.py \
+            --country "${{ matrix.country }}" \
+            --list-file "lists/${{ matrix.country }}.txt" \
+            --log-file "records/ban_log.csv" \
+            --rows-output "out/${{ matrix.country }}_rows.csv" \
+            --no-append-log
+
+      - name: Upload country artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-${{ matrix.country }}
+          path: out/${{ matrix.country }}_rows.csv
+          if-no-files-found: error
+
+  aggregate_and_notify:
+    name: Aggregate + Notify
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: check-*
+          path: out
+          merge-multiple: true
+
+      - name: Merge logs and prepare telegram text
+        id: merge
+        run: |
+          python3 - <<'PY'
+          import csv
+          import glob
+          import os
+          from collections import defaultdict
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          utc_today = datetime.now(timezone.utc).date()
+          TODAY = utc_today.isoformat()
+          LOG_FIELDS = ["date", "country", "domain", "http_code", "status"]
+          COUNTRIES = ["my", "sg", "th", "np"]
+
+          out_dir = Path("out")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          log_path = Path("records/ban_log.csv")
+          log_path.parent.mkdir(parents=True, exist_ok=True)
+
+          if not log_path.exists() or log_path.stat().st_size == 0:
+              with log_path.open("w", newline="", encoding="utf-8") as f:
+                  writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+                  writer.writeheader()
+
+          new_rows = []
+          for rows_file in sorted(glob.glob("out/*_rows.csv")):
+              with open(rows_file, "r", newline="", encoding="utf-8") as f:
+                  reader = csv.DictReader(f)
+                  for row in reader:
+                      new_rows.append(
+                          {
+                              "date": row.get("date", TODAY),
+                              "country": row.get("country", "").strip(),
+                              "domain": row.get("domain", "").strip(),
+                              "http_code": row.get("http_code", "").strip(),
+                              "status": row.get("status", "").strip(),
+                          }
+                      )
+
+          if new_rows:
+              with log_path.open("a", newline="", encoding="utf-8") as f:
+                  writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+                  writer.writerows(new_rows)
+
+          ban_dates = defaultdict(list)
+          with log_path.open("r", newline="", encoding="utf-8") as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  if row.get("status") != "BAN":
+                      continue
+                  key = (row.get("country", ""), row.get("domain", ""))
+                  try:
+                      d = datetime.strptime(row.get("date", ""), "%Y-%m-%d").date()
+                  except ValueError:
+                      continue
+                  ban_dates[key].append(d)
+
+          today_anomalies = []
+          for row in new_rows:
+              if row["status"] == "BAN":
+                  today_anomalies.append(row)
+
+          unique_keys = {}
+          for row in today_anomalies:
+              unique_keys[(row["country"], row["domain"])] = row["http_code"]
+
+          summary = []
+          for (country, domain), http_code in sorted(unique_keys.items()):
+              dates = ban_dates.get((country, domain), [])
+              if not dates:
+                  continue
+              first_ban = min(dates).isoformat()
+              c7 = sum(1 for d in dates if d >= utc_today - timedelta(days=6))
+              c30 = sum(1 for d in dates if d >= utc_today - timedelta(days=29))
+              c365 = sum(1 for d in dates if d >= utc_today - timedelta(days=364))
+              summary.append(
+                  {
+                      "country": country,
+                      "domain": domain,
+                      "http_code": http_code,
+                      "first_ban_date": first_ban,
+                      "count_7d": c7,
+                      "count_30d": c30,
+                      "count_365d": c365,
+                  }
+              )
+
+          message_file = out_dir / "telegram_message.txt"
+          has_anomalies = bool(summary)
+          if has_anomalies:
+              lines = [f"Domain anomaly summary ({TODAY})"]
+              for country in COUNTRIES:
+                  items = [x for x in summary if x["country"] == country]
+                  if not items:
+                      continue
+                  lines.append("")
+                  lines.append(country.upper())
+                  for item in items:
+                      lines.append(
+                          f"{item['domain']} | code:{item['http_code']} | first:{item['first_ban_date']} | 7d:{item['count_7d']} 30d:{item['count_30d']} 365d:{item['count_365d']}"
+                      )
+              text = "\n".join(lines)
+              if len(text) > 3900:
+                  text = text[:3860] + "\n...(truncated)"
+              message_file.write_text(text, encoding="utf-8")
+          else:
+              message_file.write_text("", encoding="utf-8")
+
+          github_output = os.environ["GITHUB_OUTPUT"]
+          with open(github_output, "a", encoding="utf-8") as f:
+              f.write(f"log_changed={'true' if bool(new_rows) else 'false'}\n")
+              f.write(f"has_anomalies={'true' if has_anomalies else 'false'}\n")
+          PY
+
+      - name: Send Telegram notification
+        if: steps.merge.outputs.has_anomalies == 'true'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+            echo "TG_BOT_TOKEN or TG_CHAT_ID is not configured. Skip notification."
+            exit 0
+          fi
+          MESSAGE="$(cat out/telegram_message.txt)"
+          curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "disable_web_page_preview=true" > /dev/null
+
+      - name: Commit ban log
+        if: steps.merge.outputs.log_changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add records/ban_log.csv
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: append ban_log.csv for $(date -u +%F)"
+          git push
