@@ -143,26 +143,133 @@ jobs:
                   }
               )
 
-          message_file = out_dir / "telegram_message.txt"
+          daily_summary_file = out_dir / "telegram_daily_summary.txt"
+          alert_file = out_dir / "telegram_alert.txt"
+
+          country_title = {
+              "my": "🇲🇾 Malaysia",
+              "sg": "🇸🇬 Singapore",
+              "th": "🇹🇭 Thailand",
+              "np": "🇳🇵 Nepal",
+          }
+
+          def status_desc(http_code: str) -> str:
+              if http_code == "200":
+                  return "Reachable"
+              if http_code == "000":
+                  return "Connection failed"
+              if http_code == "403":
+                  return "Access restricted"
+              if http_code == "451":
+                  return "Blocked by legal policy"
+              if len(http_code) == 3 and http_code.startswith(("52", "53")):
+                  return "Server error"
+              return "Abnormal status"
+
+          ok_by_country = {c: [] for c in COUNTRIES}
+          for row in new_rows:
+              if row["status"] == "OK":
+                  ok_by_country[row["country"]].append(row["domain"])
+          for c in COUNTRIES:
+              ok_by_country[c] = sorted(set(ok_by_country[c]))
+
+          ban_by_country = {c: [] for c in COUNTRIES}
+          for item in summary:
+              ban_by_country[item["country"]].append(item)
+          for c in COUNTRIES:
+              ban_by_country[c] = sorted(ban_by_country[c], key=lambda x: x["domain"])
+
+          ok_count = sum(len(ok_by_country[c]) for c in COUNTRIES)
+          ban_count = len(summary)
+          total_count = ok_count + ban_count
+
           has_anomalies = bool(summary)
           if has_anomalies:
-              lines = [f"Domain anomaly summary ({TODAY})"]
-              for country in COUNTRIES:
-                  items = [x for x in summary if x["country"] == country]
+              daily_lines = [
+                  "📊 Daily Website Check Report",
+                  f"Date: {TODAY}",
+                  "",
+                  "————————————",
+                  f"🟢 Reachable ({ok_count})",
+                  "————————————",
+                  "",
+              ]
+
+              has_ok_items = False
+              for c in COUNTRIES:
+                  items = ok_by_country[c]
                   if not items:
                       continue
-                  lines.append("")
-                  lines.append(country.upper())
+                  has_ok_items = True
+                  daily_lines.append(country_title[c])
+                  daily_lines.extend(items)
+                  daily_lines.append("")
+              if not has_ok_items:
+                  daily_lines.append("(none)")
+                  daily_lines.append("")
+
+              daily_lines.extend(
+                  [
+                      "————————————",
+                      f"🔴 Errors ({ban_count})",
+                      "————————————",
+                      "",
+                  ]
+              )
+              if ban_count == 0:
+                  daily_lines.append("(none)")
+                  daily_lines.append("")
+              else:
+                  for c in COUNTRIES:
+                      items = ban_by_country[c]
+                      if not items:
+                          continue
+                      daily_lines.append(country_title[c])
+                      for item in items:
+                          code = item["http_code"]
+                          daily_lines.append(item["domain"])
+                          daily_lines.append(f"  Status: {status_desc(code)} (code:{code})")
+                          daily_lines.append(f"  First anomaly: {item['first_ban_date']}")
+                          daily_lines.append(f"  Last 7 days: {item['count_7d']} times")
+                      daily_lines.append("")
+
+              daily_lines.extend(
+                  [
+                      "————————————",
+                      f"Total: {total_count}",
+                      f"🟢 Reachable: {ok_count}",
+                      f"🔴 Errors: {ban_count}",
+                  ]
+              )
+              daily_text = "\n".join(daily_lines)
+              if len(daily_text) > 3900:
+                  daily_text = daily_text[:3860] + "\n...(truncated)"
+              daily_summary_file.write_text(daily_text, encoding="utf-8")
+
+              alert_lines = [
+                  "🚨 Website Access Anomaly Alert",
+                  f"Date: {TODAY}",
+                  "",
+              ]
+              for c in COUNTRIES:
+                  items = ban_by_country[c]
+                  if not items:
+                      continue
+                  alert_lines.append(country_title[c])
                   for item in items:
-                      lines.append(
-                          f"{item['domain']} | code:{item['http_code']} | first:{item['first_ban_date']} | 7d:{item['count_7d']} 30d:{item['count_30d']} 365d:{item['count_365d']}"
-                      )
-              text = "\n".join(lines)
-              if len(text) > 3900:
-                  text = text[:3860] + "\n...(truncated)"
-              message_file.write_text(text, encoding="utf-8")
+                      code = item["http_code"]
+                      alert_lines.append(item["domain"])
+                      alert_lines.append(f"  Status: {status_desc(code)} (code:{code})")
+                      alert_lines.append(f"  First anomaly: {item['first_ban_date']}")
+                      alert_lines.append(f"  Last 7 days: {item['count_7d']} times")
+                  alert_lines.append("")
+              alert_text = "\n".join(alert_lines).strip()
+              if len(alert_text) > 3900:
+                  alert_text = alert_text[:3860] + "\n...(truncated)"
+              alert_file.write_text(alert_text, encoding="utf-8")
           else:
-              message_file.write_text("", encoding="utf-8")
+              daily_summary_file.write_text("", encoding="utf-8")
+              alert_file.write_text("", encoding="utf-8")
 
           github_output = os.environ["GITHUB_OUTPUT"]
           with open(github_output, "a", encoding="utf-8") as f:
@@ -180,10 +287,15 @@ jobs:
             echo "TG_BOT_TOKEN or TG_CHAT_ID is not configured. Skip notification."
             exit 0
           fi
-          MESSAGE="$(cat out/telegram_message.txt)"
+          DAILY_MESSAGE="$(cat out/telegram_daily_summary.txt)"
+          ALERT_MESSAGE="$(cat out/telegram_alert.txt)"
           curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "text=${DAILY_MESSAGE}" \
+            --data-urlencode "disable_web_page_preview=true" > /dev/null
+          curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${ALERT_MESSAGE}" \
             --data-urlencode "disable_web_page_preview=true" > /dev/null
 
       - name: Commit ban log

@@ -13,7 +13,9 @@
 ```text
 .github/workflows/daily_check.yml
 scripts/check_domains.py
-bot/bot.py
+bot/bot.js
+bot/package.json
+bot/README.md
 lists/my.txt
 lists/sg.txt
 lists/th.txt
@@ -30,7 +32,9 @@ README.md
 - 系统会自动 normalize：
   - 去 `http://` / `https://`
   - 去路径和端口
+  - 去开头 `www.`
   - 转小写
+  - 校验合法域名格式
 - 系统会自动去重（检测时和 Bot 写回时）
 
 ## GitHub Actions 检测逻辑
@@ -125,13 +129,14 @@ sudo ./svc.sh start
 
 ## Bot（动态管理 domain 列表）
 
-Bot 脚本：`bot/bot.py`  
+Bot 脚本：`bot/bot.js`  
 支持命令：
 
 - `/countries`
 - `/add <country> <domain>`
 - `/remove <country> <domain>`
 - `/list <country>`
+- `/help`
 
 约束：
 
@@ -152,8 +157,9 @@ Bot 脚本：`bot/bot.py`
 ### Bot 依赖与运行
 
 ```bash
-pip install python-telegram-bot==21.*
-python bot/bot.py
+cd bot
+npm install
+node bot.js
 ```
 
 当执行 `/add` 或 `/remove` 时，Bot 会通过 GitHub API 提交 `lists/<country>.txt`，commit message 包含：
@@ -162,6 +168,8 @@ python bot/bot.py
 - `action`
 - `country`
 - `domain`
+
+更多 Bot 部署与 PM2 说明见 `bot/README.md`。
 
 ## 手动触发 workflow_dispatch
 

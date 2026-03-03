@@ -10,6 +10,26 @@ from urllib.parse import urlparse
 
 ALLOWED_COUNTRIES = {"my", "sg", "th", "np"}
 LOG_FIELDS = ["date", "country", "domain", "http_code", "status"]
+LABEL_RE = re.compile(r"^[a-z0-9-]{1,63}$")
+IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def is_valid_domain(host: str) -> bool:
+    if not host or len(host) > 253:
+        return False
+    if IPV4_RE.fullmatch(host):
+        return False
+    labels = host.split(".")
+    if len(labels) < 2:
+        return False
+    for label in labels:
+        if not LABEL_RE.fullmatch(label):
+            return False
+        if label.startswith("-") or label.endswith("-"):
+            return False
+    if labels[-1].isdigit():
+        return False
+    return True
 
 
 def normalize_domain(raw: str) -> str:
@@ -17,11 +37,12 @@ def normalize_domain(raw: str) -> str:
     if not text or text.startswith("#"):
         return ""
     token = text.split()[0]
-    probe = token if "://" in token else f"//{token}"
+    probe = token if "://" in token else f"https://{token}"
     parsed = urlparse(probe)
-    host = parsed.netloc or parsed.path
-    host = host.split("/")[0].split("@")[-1].split(":")[0].strip(".")
-    if not host or " " in host:
+    host = (parsed.hostname or "").strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not is_valid_domain(host):
         return ""
     return host
 
