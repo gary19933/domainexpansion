@@ -4,6 +4,8 @@ require("dotenv").config();
 
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
+const { HttpsProxyAgent } = require("https-proxy-agent");
+const { SocksProxyAgent } = require("socks-proxy-agent");
 
 const ALLOWED_COUNTRIES = new Set(["my", "sg", "th", "np"]);
 const DOMAIN_LABEL_RE = /^[a-z0-9-]{1,63}$/;
@@ -410,10 +412,26 @@ function isErrorHttpCode(httpCode) {
   return isServer52xOr53x(httpCode);
 }
 
-async function checkOneDomain(domain) {
+function createScanHttpConfig(proxyUrl) {
+  const value = (proxyUrl || "").trim();
+  if (!value) {
+    return {};
+  }
+  const agent = /^socks/i.test(value)
+    ? new SocksProxyAgent(value)
+    : new HttpsProxyAgent(value);
+  return {
+    proxy: false,
+    httpAgent: agent,
+    httpsAgent: agent,
+  };
+}
+
+async function checkOneDomain(domain, scanHttpConfig) {
   const url = `https://www.${domain}`;
   try {
     const response = await axios.get(url, {
+      ...(scanHttpConfig || {}),
       maxRedirects: 5,
       timeout: 10000,
       validateStatus: () => true,
@@ -523,7 +541,9 @@ async function main() {
   const ghOwner = requireEnv("GH_OWNER");
   const ghRepo = requireEnv("GH_REPO");
   const ghBranch = (process.env.GH_BRANCH || "main").trim() || "main";
+  const scanProxyUrl = (process.env.SCAN_PROXY_URL || process.env.RES_PROXY_URL || "").trim();
   const allowUsers = parseAllowUsers(requireEnv("ALLOW_USERS"));
+  const scanHttpConfig = createScanHttpConfig(scanProxyUrl);
 
   const gh = createGithubClient(ghToken);
   const bot = new TelegramBot(tgToken, { polling: true });
@@ -867,7 +887,7 @@ async function main() {
         const scanResults = await mapWithConcurrency(
           domains,
           MAX_SCAN_CONCURRENCY,
-          checkOneDomain
+          (domain) => checkOneDomain(domain, scanHttpConfig)
         );
         await bot.sendMessage(chatId, formatScanReport(country, scanResults));
         return;

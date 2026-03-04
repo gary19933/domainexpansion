@@ -75,6 +75,7 @@ SG → TH
 - 支持国家：`my`, `sg`, `th`, `np`
 - 读取 `lists/<country>.txt` 的 canonical domain 做即时检测
 - 检测 URL：`https://www.<domain>`，跟随跳转最多 5 次，超时 10 秒
+- 如设置代理，`/scan` 会优先使用 `SCAN_PROXY_URL`，否则回退到 `RES_PROXY_URL`
 - 并发上限：10
 - 单次最多扫描：500 条（超过返回 `❌ Too many domains.`）
 - 结果分为 `🟢 正常` 与 `🔴 异常` 两组显示
@@ -103,6 +104,10 @@ SG → TH
   默认 `main`
 - `ALLOW_USERS`  
   允许操作 bot 的 Telegram `user_id`，多个用户用逗号分隔，例如：`123456789,987654321`
+- `RES_PROXY_URL`（可选）  
+  `/scan` 默认代理地址（支持 `http/https/socks5`）
+- `SCAN_PROXY_URL`（可选）  
+  `/scan` 专用代理地址；若设置会覆盖 `RES_PROXY_URL`
 
 ## 部署
 

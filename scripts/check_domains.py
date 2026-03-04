@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import json
 import os
 import re
 import subprocess
@@ -60,7 +61,46 @@ def load_domains(list_file: Path) -> list[str]:
     return domains
 
 
-def run_nslookup(domain: str) -> tuple[int, str]:
+def run_nslookup(domain: str, proxy_url: str = "") -> tuple[int, str]:
+    # nslookup itself does not support HTTP/SOCKS proxy.
+    # When proxy is configured, use DoH via curl so DNS resolution also goes through proxy.
+    if proxy_url:
+        cmd = [
+            "curl",
+            "--proxy",
+            proxy_url,
+            "--max-time",
+            "12",
+            "-sS",
+            "-H",
+            "accept: application/dns-json",
+            f"https://cloudflare-dns.com/dns-query?name={domain}&type=A",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            output = (proc.stdout or "").strip()
+            if not output:
+                return 1, proc.stderr.strip() or "empty doh response"
+            try:
+                payload = json.loads(output)
+            except json.JSONDecodeError:
+                return 1, output
+            status = int(payload.get("Status", 1))
+            answers = payload.get("Answer", []) or []
+            if status == 0 and answers:
+                return 0, output
+            return 1, output
+        except FileNotFoundError:
+            return 127, "curl command not found"
+        except subprocess.TimeoutExpired:
+            return 124, "doh lookup timeout"
+
     try:
         proc = subprocess.run(
             ["nslookup", domain],
@@ -76,9 +116,11 @@ def run_nslookup(domain: str) -> tuple[int, str]:
         return 124, "nslookup timeout"
 
 
-def run_curl_http_code(domain: str) -> str:
-    cmd = [
-        "curl",
+def run_curl_http_code(domain: str, proxy_url: str = "") -> str:
+    cmd = ["curl"]
+    if proxy_url:
+        cmd.extend(["--proxy", proxy_url])
+    cmd.extend([
         "-L",
         "--max-time",
         "20",
@@ -90,7 +132,7 @@ def run_curl_http_code(domain: str) -> str:
         "-w",
         "%{http_code}",
         f"http://{domain}",
-    ]
+    ])
     try:
         proc = subprocess.run(
             cmd,
@@ -141,12 +183,14 @@ def append_log(log_file: Path, rows: list[dict[str, str]]) -> None:
             writer.writerows(rows)
 
 
-def check_country(country: str, list_file: Path, day: str) -> list[dict[str, str]]:
+def check_country(
+    country: str, list_file: Path, day: str, proxy_url: str = ""
+) -> list[dict[str, str]]:
     domains = load_domains(list_file)
     rows: list[dict[str, str]] = []
     for domain in domains:
-        run_nslookup(domain)
-        http_code = run_curl_http_code(domain)
+        run_nslookup(domain, proxy_url)
+        http_code = run_curl_http_code(domain, proxy_url)
         status = "BAN" if is_ban(http_code) else "OK"
         rows.append(
             {
@@ -176,12 +220,18 @@ def main() -> None:
         action="store_true",
         help="Do not append results to log file (useful for matrix jobs).",
     )
+    parser.add_argument(
+        "--proxy-url",
+        default=(os.getenv("RES_PROXY_URL", "").strip()),
+        help="Optional proxy URL. Also reads RES_PROXY_URL env var.",
+    )
     args = parser.parse_args()
 
     list_file = args.list_file or Path("lists") / f"{args.country}.txt"
     rows_output = args.rows_output or Path("out") / f"{args.country}_rows.csv"
+    proxy_url = (args.proxy_url or "").strip()
 
-    rows = check_country(args.country, list_file, args.date)
+    rows = check_country(args.country, list_file, args.date, proxy_url)
     write_rows_csv(rows_output, rows)
     if not args.no_append_log:
         append_log(args.log_file, rows)
