@@ -168,19 +168,6 @@ jobs:
               "np": "🇳🇵 Nepal",
           }
 
-          def status_desc(http_code: str) -> str:
-              if http_code == "200":
-                  return "Reachable"
-              if http_code == "000":
-                  return "Connection failed"
-              if http_code == "403":
-                  return "Access restricted"
-              if http_code == "451":
-                  return "Blocked by legal policy"
-              if len(http_code) == 3 and http_code.startswith(("52", "53")):
-                  return "Server error"
-              return "Abnormal status"
-
           ok_by_country = {c: [] for c in COUNTRIES}
           for row in new_rows:
               if row["status"] == "OK":
@@ -241,11 +228,7 @@ jobs:
                           continue
                       daily_lines.append(country_title[c])
                       for item in items:
-                          code = item["http_code"]
-                          daily_lines.append(item["domain"])
-                          daily_lines.append(f"  Status: {status_desc(code)} (code:{code})")
-                          daily_lines.append(f"  First anomaly: {item['first_ban_date']}")
-                          daily_lines.append(f"  Last 7 days: {item['count_7d']} times")
+                          daily_lines.append(f"Domain: {item['domain']}")
                       daily_lines.append("")
 
               daily_lines.extend(
@@ -272,11 +255,7 @@ jobs:
                       continue
                   alert_lines.append(country_title[c])
                   for item in items:
-                      code = item["http_code"]
-                      alert_lines.append(item["domain"])
-                      alert_lines.append(f"  Status: {status_desc(code)} (code:{code})")
-                      alert_lines.append(f"  First anomaly: {item['first_ban_date']}")
-                      alert_lines.append(f"  Last 7 days: {item['count_7d']} times")
+                      alert_lines.append(f"Domain: {item['domain']}")
                   alert_lines.append("")
               alert_text = "\n".join(alert_lines).strip()
               if len(alert_text) > 3900:
