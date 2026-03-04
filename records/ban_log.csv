@@ -7,3 +7,8 @@ date,country,domain,http_code,status
 2026-03-03,my,google.com,200,OK
 2026-03-03,my,facebook.com,200,OK
 2026-03-03,my,abc-this-will-fail-999999.com,000,BAN
+2026-03-04,my,google.com,200,OK
+2026-03-04,my,facebook.com,200,OK
+2026-03-04,my,abc-this-will-fail-999999.com,000,BAN
+2026-03-04,sg,facebook.com,200,OK
+2026-03-04,sg,google.com,200,OK
