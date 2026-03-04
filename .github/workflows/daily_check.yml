@@ -22,14 +22,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run country check
+        env:
+          RES_PROXY_MY: ${{ secrets.RES_PROXY_MY }}
+          RES_PROXY_SG: ${{ secrets.RES_PROXY_SG }}
+          RES_PROXY_TH: ${{ secrets.RES_PROXY_TH }}
+          RES_PROXY_NP: ${{ secrets.RES_PROXY_NP }}
         run: |
+          COUNTRY_PROXY=""
+          case "${{ matrix.country }}" in
+            my) COUNTRY_PROXY="$RES_PROXY_MY" ;;
+            sg) COUNTRY_PROXY="$RES_PROXY_SG" ;;
+            th) COUNTRY_PROXY="$RES_PROXY_TH" ;;
+            np) COUNTRY_PROXY="$RES_PROXY_NP" ;;
+          esac
+
           mkdir -p out
           python3 scripts/check_domains.py \
             --country "${{ matrix.country }}" \
             --list-file "lists/${{ matrix.country }}.txt" \
             --log-file "records/ban_log.csv" \
             --rows-output "out/${{ matrix.country }}_rows.csv" \
-            --no-append-log
+            --no-append-log \
+            --proxy-url "$COUNTRY_PROXY"
 
       - name: Upload country artifact
         uses: actions/upload-artifact@v4

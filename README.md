@@ -98,6 +98,15 @@ GitHub Secrets（Actions 用）：
 
 - `TG_BOT_TOKEN`
 - `TG_CHAT_ID`
+- `RES_PROXY_MY`（可选，Malaysia 检测代理）
+- `RES_PROXY_SG`（可选，Singapore 检测代理）
+- `RES_PROXY_TH`（可选，Thailand 检测代理）
+- `RES_PROXY_NP`（可选，Nepal 检测代理）
+
+说明：
+
+- 每个国家 job 会优先使用对应国家的代理。
+- 若对应 secret 为空，则该国家会直连检测（不走代理）。
 
 ## 自托管 Runner 安装（VPS）
 

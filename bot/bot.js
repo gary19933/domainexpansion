@@ -427,6 +427,23 @@ function createScanHttpConfig(proxyUrl) {
   };
 }
 
+function resolveScanProxyByCountry(country, env) {
+  const key = String(country || "").trim().toUpperCase();
+  const candidates = [
+    { source: `SCAN_PROXY_${key}`, value: env[`SCAN_PROXY_${key}`] },
+    { source: `RES_PROXY_${key}`, value: env[`RES_PROXY_${key}`] },
+    { source: "SCAN_PROXY_URL", value: env.SCAN_PROXY_URL },
+    { source: "RES_PROXY_URL", value: env.RES_PROXY_URL },
+  ];
+  for (const item of candidates) {
+    const value = (item.value || "").trim();
+    if (value) {
+      return { proxyUrl: value, source: item.source };
+    }
+  }
+  return { proxyUrl: "", source: "DIRECT" };
+}
+
 async function checkOneDomain(domain, scanHttpConfig) {
   const url = `https://www.${domain}`;
   try {
@@ -541,9 +558,7 @@ async function main() {
   const ghOwner = requireEnv("GH_OWNER");
   const ghRepo = requireEnv("GH_REPO");
   const ghBranch = (process.env.GH_BRANCH || "main").trim() || "main";
-  const scanProxyUrl = (process.env.SCAN_PROXY_URL || process.env.RES_PROXY_URL || "").trim();
   const allowUsers = parseAllowUsers(requireEnv("ALLOW_USERS"));
-  const scanHttpConfig = createScanHttpConfig(scanProxyUrl);
 
   const gh = createGithubClient(ghToken);
   const bot = new TelegramBot(tgToken, { polling: true });
@@ -883,6 +898,12 @@ async function main() {
           await bot.sendMessage(chatId, "❌ Too many domains.");
           return;
         }
+
+        const scanProxy = resolveScanProxyByCountry(country, process.env);
+        const scanHttpConfig = createScanHttpConfig(scanProxy.proxyUrl);
+        console.log(
+          `/scan country=${country} domains=${domains.length} proxy_source=${scanProxy.source}`
+        );
 
         const scanResults = await mapWithConcurrency(
           domains,
