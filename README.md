@@ -133,8 +133,9 @@ Bot 脚本：`bot/bot.js`
 支持命令：
 
 - `/countries`
-- `/add <country> <domain>`
-- `/remove <country> <domain>`
+- `/add <country> <domains...>`
+- `/import <country>`
+- `/remove <country> <domains...>`
 - `/list <country>`
 - `/help`
 
@@ -159,15 +160,14 @@ Bot 脚本：`bot/bot.js`
 ```bash
 cd bot
 npm install
-node bot.js
+cp .env.example .env
+# 编辑 .env
+npm start
 ```
 
-当执行 `/add` 或 `/remove` 时，Bot 会通过 GitHub API 提交 `lists/<country>.txt`，commit message 包含：
+`.env` 已在 `bot/.gitignore` 中忽略，不要提交 token。
 
-- `user_id`
-- `action`
-- `country`
-- `domain`
+当执行 `/add`、`/import` 或 `/remove` 时，Bot 会通过 GitHub API 提交 `lists/<country>.txt`，并使用单次 commit（同一条命令只提交一次）。
 
 更多 Bot 部署与 PM2 说明见 `bot/README.md`。
 

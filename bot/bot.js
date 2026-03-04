@@ -1,11 +1,23 @@
 "use strict";
 
+require("dotenv").config();
+
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 
 const ALLOWED_COUNTRIES = new Set(["my", "sg", "th", "np"]);
 const DOMAIN_LABEL_RE = /^[a-z0-9-]{1,63}$/;
 const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const MAX_INPUT_DOMAINS = 500;
+const SUPPORTED_COMMANDS = new Set([
+  "/countries",
+  "/add",
+  "/import",
+  "/remove",
+  "/list",
+  "/help",
+  "/whoami",
+]);
 
 function requireEnv(name) {
   const value = (process.env[name] || "").trim();
@@ -107,6 +119,111 @@ function formatFileContent(domains) {
   return `${domains.join("\n")}\n`;
 }
 
+function parseCommand(text) {
+  const match = text.match(/^\/([a-z_]+)(?:@\S+)?(?:\s+([\s\S]*))?$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    command: `/${match[1].toLowerCase()}`,
+    args: match[2] || "",
+  };
+}
+
+function parseCountryAndPayload(argsText) {
+  const trimmed = (argsText || "").trim();
+  if (!trimmed) {
+    return { country: "", payload: "" };
+  }
+  const match = trimmed.match(/^([^\s]+)([\s\S]*)$/);
+  if (!match) {
+    return { country: "", payload: "" };
+  }
+  return {
+    country: match[1].toLowerCase(),
+    payload: (match[2] || "").trim(),
+  };
+}
+
+function tokenizeAddPayload(payload) {
+  return (payload || "")
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function tokenizeImportPayload(payload) {
+  return (payload || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function mergeDomains(existingDomains, canonicalCandidates) {
+  const merged = new Set(existingDomains);
+  const added = [];
+  let skippedExisting = 0;
+
+  for (const canonical of canonicalCandidates) {
+    if (merged.has(canonical)) {
+      skippedExisting += 1;
+      continue;
+    }
+    merged.add(canonical);
+    added.push(canonical);
+  }
+
+  added.sort();
+  return {
+    updatedDomains: Array.from(merged).sort(),
+    addedDomains: added,
+    skippedExisting,
+  };
+}
+
+function normalizeAndDedupCandidates(inputCandidates) {
+  const seen = new Set();
+  const normalized = [];
+  let invalidCount = 0;
+
+  for (const rawDomain of inputCandidates) {
+    const canonical = normalizeDomain(rawDomain);
+    if (!canonical) {
+      invalidCount += 1;
+      continue;
+    }
+    if (seen.has(canonical)) {
+      continue;
+    }
+    seen.add(canonical);
+    normalized.push(canonical);
+  }
+
+  return { normalized, invalidCount };
+}
+
+function formatAddOrImportMessage(action, count, country, skippedExisting, invalidCount) {
+  const lines = [
+    `✅ ${action} ${count} domains to ${country.toUpperCase()}`,
+    `⚠️ Skipped ${skippedExisting} existing domains`,
+  ];
+  if (invalidCount > 0) {
+    lines.push(`❌ Invalid skipped ${invalidCount} domains`);
+  }
+  return lines.join("\n");
+}
+
+function formatRemoveMessage(count, country, skippedNotFound, invalidCount) {
+  const lines = [
+    `✅ Removed ${count} domains from ${country.toUpperCase()}`,
+    `⚠️ Skipped ${skippedNotFound} not found`,
+  ];
+  if (invalidCount > 0) {
+    lines.push(`❌ Invalid skipped ${invalidCount} domains`);
+  }
+  return lines.join("\n");
+}
+
 function createGithubClient(token) {
   return axios.create({
     baseURL: "https://api.github.com",
@@ -175,9 +292,11 @@ function usageHelp() {
   return [
     "Commands:",
     "/countries",
-    "/add <country> <domain>",
-    "/remove <country> <domain>",
+    "/add <country> <domains...>",
+    "/import <country> (domains on next lines)",
+    "/remove <country> <domains...>",
     "/list <country>",
+    "/whoami",
     "/help",
   ].join("\n");
 }
@@ -204,14 +323,15 @@ async function main() {
         return;
       }
 
-      const parts = text.split(/\s+/);
-      const command = parts[0].split("@")[0].toLowerCase();
+      const parsed = parseCommand(text);
+      if (!parsed) {
+        return;
+      }
+      const { command, args } = parsed;
       const chatId = msg.chat.id;
       const userId = String(msg.from && msg.from.id ? msg.from.id : "");
 
-      if (
-        !["/countries", "/add", "/remove", "/list", "/help"].includes(command)
-      ) {
+      if (!SUPPORTED_COMMANDS.has(command)) {
         return;
       }
 
@@ -230,12 +350,18 @@ async function main() {
         return;
       }
 
+      if (command === "/whoami") {
+        await bot.sendMessage(chatId, `Your user_id: ${userId}`);
+        return;
+      }
+
       if (command === "/list") {
-        if (parts.length !== 2) {
+        const listArgs = args.trim().split(/\s+/).filter(Boolean);
+        if (listArgs.length !== 1) {
           await bot.sendMessage(chatId, "Usage: /list <country>");
           return;
         }
-        const country = parts[1].toLowerCase();
+        const country = listArgs[0].toLowerCase();
         if (!ALLOWED_COUNTRIES.has(country)) {
           await bot.sendMessage(chatId, "Invalid country. Use: my, sg, th, np");
           return;
@@ -263,25 +389,42 @@ async function main() {
         return;
       }
 
-      if (command === "/add" || command === "/remove") {
-        if (parts.length < 3) {
+      if (command === "/add" || command === "/import") {
+        const { country, payload } = parseCountryAndPayload(args);
+        if (!country) {
           await bot.sendMessage(
             chatId,
-            `Usage: ${command} <country> <domain>`
+            command === "/add"
+              ? "Usage: /add <country> <domains...>"
+              : "Usage: /import <country>"
           );
           return;
         }
-
-        const country = parts[1].toLowerCase();
         if (!ALLOWED_COUNTRIES.has(country)) {
           await bot.sendMessage(chatId, "Invalid country. Use: my, sg, th, np");
           return;
         }
 
-        const domainInput = parts.slice(2).join("");
-        const canonicalDomain = normalizeDomain(domainInput);
-        if (!canonicalDomain) {
-          await bot.sendMessage(chatId, "Invalid domain.");
+        let candidates = [];
+        if (command === "/add") {
+          candidates = tokenizeAddPayload(payload);
+          if (candidates.length === 0) {
+            await bot.sendMessage(chatId, "Usage: /add <country> <domains...>");
+            return;
+          }
+        } else {
+          candidates = tokenizeImportPayload(payload);
+          if (candidates.length === 0) {
+            await bot.sendMessage(
+              chatId,
+              "❌ Please paste domains below the command."
+            );
+            return;
+          }
+        }
+
+        if (candidates.length > MAX_INPUT_DOMAINS) {
+          await bot.sendMessage(chatId, "❌ Too many domains.");
           return;
         }
 
@@ -293,13 +436,86 @@ async function main() {
           country
         );
 
-        if (command === "/add") {
-          if (domains.includes(canonicalDomain)) {
-            await bot.sendMessage(chatId, "Domain already exists.");
-            return;
+        const { normalized, invalidCount } = normalizeAndDedupCandidates(candidates);
+        const mergeResult = mergeDomains(domains, normalized);
+        const addedCount = mergeResult.addedDomains.length;
+
+        if (addedCount > 0) {
+          const commitAction = command === "/add" ? "add" : "import";
+          const commitMessage = `bot: ${commitAction} ${addedCount} domains to ${country} by ${userId}`;
+          await updateCountryDomains(
+            gh,
+            ghOwner,
+            ghRepo,
+            ghBranch,
+            country,
+            mergeResult.updatedDomains,
+            sha,
+            commitMessage
+          );
+        }
+
+        const actionWord = command === "/add" ? "Added" : "Imported";
+        await bot.sendMessage(
+          chatId,
+          formatAddOrImportMessage(
+            actionWord,
+            addedCount,
+            country,
+            mergeResult.skippedExisting,
+            invalidCount
+          )
+        );
+        return;
+      }
+
+      if (command === "/remove") {
+        const { country, payload } = parseCountryAndPayload(args);
+        if (!country) {
+          await bot.sendMessage(chatId, "Usage: /remove <country> <domains...>");
+          return;
+        }
+        if (!ALLOWED_COUNTRIES.has(country)) {
+          await bot.sendMessage(chatId, "Invalid country. Use: my, sg, th, np");
+          return;
+        }
+
+        const candidates = tokenizeAddPayload(payload);
+        if (candidates.length === 0) {
+          await bot.sendMessage(chatId, "Usage: /remove <country> <domains...>");
+          return;
+        }
+        if (candidates.length > MAX_INPUT_DOMAINS) {
+          await bot.sendMessage(chatId, "❌ Too many domains.");
+          return;
+        }
+
+        const { domains, sha } = await getCountryDomains(
+          gh,
+          ghOwner,
+          ghRepo,
+          ghBranch,
+          country
+        );
+
+        const { normalized, invalidCount } = normalizeAndDedupCandidates(candidates);
+        const domainSet = new Set(domains);
+        const removeList = [];
+        let skippedNotFound = 0;
+
+        for (const domain of normalized) {
+          if (domainSet.has(domain)) {
+            removeList.push(domain);
+            continue;
           }
-          const updated = [...domains, canonicalDomain].sort();
-          const commitMessage = `bot: add ${canonicalDomain} to ${country} by ${userId}`;
+          skippedNotFound += 1;
+        }
+
+        const removedCount = removeList.length;
+        if (removedCount > 0) {
+          const removeSet = new Set(removeList);
+          const updated = domains.filter((item) => !removeSet.has(item));
+          const commitMessage = `bot: remove ${removedCount} domains from ${country} by ${userId}`;
           await updateCountryDomains(
             gh,
             ghOwner,
@@ -310,27 +526,13 @@ async function main() {
             sha,
             commitMessage
           );
-          await bot.sendMessage(chatId, `Added: ${country} ${canonicalDomain}`);
-          return;
         }
 
-        if (!domains.includes(canonicalDomain)) {
-          await bot.sendMessage(chatId, "Domain not found.");
-          return;
-        }
-        const updated = domains.filter((item) => item !== canonicalDomain);
-        const commitMessage = `bot: remove ${canonicalDomain} from ${country} by ${userId}`;
-        await updateCountryDomains(
-          gh,
-          ghOwner,
-          ghRepo,
-          ghBranch,
-          country,
-          updated,
-          sha,
-          commitMessage
+        await bot.sendMessage(
+          chatId,
+          formatRemoveMessage(removedCount, country, skippedNotFound, invalidCount)
         );
-        await bot.sendMessage(chatId, `Removed: ${country} ${canonicalDomain}`);
+        return;
       }
     } catch (error) {
       const chatId = msg && msg.chat ? msg.chat.id : null;
