@@ -9,11 +9,15 @@ const ALLOWED_COUNTRIES = new Set(["my", "sg", "th", "np"]);
 const DOMAIN_LABEL_RE = /^[a-z0-9-]{1,63}$/;
 const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const MAX_INPUT_DOMAINS = 500;
+const MAX_SCAN_CONCURRENCY = 10;
+const TELEGRAM_MESSAGE_LIMIT = 3900;
 const SUPPORTED_COMMANDS = new Set([
   "/countries",
   "/add",
   "/import",
   "/remove",
+  "/move",
+  "/scan",
   "/list",
   "/help",
   "/whoami",
@@ -112,6 +116,10 @@ function parseDomainLines(content) {
   return result;
 }
 
+function parseDomainsFromListFile(content) {
+  return parseDomainLines(content);
+}
+
 function formatFileContent(domains) {
   if (!domains || domains.length === 0) {
     return "";
@@ -142,6 +150,22 @@ function parseCountryAndPayload(argsText) {
   return {
     country: match[1].toLowerCase(),
     payload: (match[2] || "").trim(),
+  };
+}
+
+function parseMoveArgs(argsText) {
+  const trimmed = (argsText || "").trim();
+  if (!trimmed) {
+    return { fromCountry: "", toCountry: "", payload: "" };
+  }
+  const match = trimmed.match(/^([^\s]+)\s+([^\s]+)([\s\S]*)$/);
+  if (!match) {
+    return { fromCountry: "", toCountry: "", payload: "" };
+  }
+  return {
+    fromCountry: match[1].toLowerCase(),
+    toCountry: match[2].toLowerCase(),
+    payload: (match[3] || "").trim(),
   };
 }
 
@@ -254,7 +278,7 @@ async function getCountryDomains(client, owner, repo, branch, country) {
     const content = payload.content
       ? Buffer.from(payload.content, "base64").toString("utf8")
       : "";
-    return { domains: parseDomainLines(content), sha: payload.sha || null };
+    return { domains: parseDomainsFromListFile(content), sha: payload.sha || null };
   } catch (error) {
     if (error.response && error.response.status === 404) {
       return { domains: [], sha: null };
@@ -288,6 +312,196 @@ async function updateCountryDomains(
   }
 }
 
+async function commitCountryDomainUpdates(
+  client,
+  owner,
+  repo,
+  branch,
+  updates,
+  message
+) {
+  if (!updates || updates.length === 0) {
+    return;
+  }
+
+  const refName = `heads/${branch}`;
+  const refPath = `/repos/${owner}/${repo}/git/ref/${encodeURIComponent(refName)}`;
+
+  try {
+    const refResp = await client.get(refPath);
+    const baseCommitSha = refResp.data && refResp.data.object ? refResp.data.object.sha : "";
+    if (!baseCommitSha) {
+      throw new Error("GitHub API error: missing base commit sha");
+    }
+
+    const commitResp = await client.get(
+      `/repos/${owner}/${repo}/git/commits/${baseCommitSha}`
+    );
+    const baseTreeSha =
+      commitResp.data && commitResp.data.tree ? commitResp.data.tree.sha : "";
+    if (!baseTreeSha) {
+      throw new Error("GitHub API error: missing base tree sha");
+    }
+
+    const tree = updates.map((item) => ({
+      path: `lists/${item.country}.txt`,
+      mode: "100644",
+      type: "blob",
+      content: formatFileContent(item.domains),
+    }));
+
+    const treeResp = await client.post(`/repos/${owner}/${repo}/git/trees`, {
+      base_tree: baseTreeSha,
+      tree,
+    });
+    const newTreeSha = treeResp.data ? treeResp.data.sha : "";
+    if (!newTreeSha) {
+      throw new Error("GitHub API error: failed to create tree");
+    }
+
+    const newCommitResp = await client.post(`/repos/${owner}/${repo}/git/commits`, {
+      message,
+      tree: newTreeSha,
+      parents: [baseCommitSha],
+    });
+    const newCommitSha = newCommitResp.data ? newCommitResp.data.sha : "";
+    if (!newCommitSha) {
+      throw new Error("GitHub API error: failed to create commit");
+    }
+
+    await client.patch(refPath, { sha: newCommitSha, force: false });
+  } catch (error) {
+    throw new Error(getApiErrorMessage(error));
+  }
+}
+
+function formatCode(httpCode) {
+  if (!httpCode || httpCode === 0) {
+    return "000";
+  }
+  return String(httpCode);
+}
+
+function isServer52xOr53x(httpCode) {
+  const text = formatCode(httpCode);
+  return /^\d{3}$/.test(text) && (text.startsWith("52") || text.startsWith("53"));
+}
+
+function getHttpStatusReason(httpCode) {
+  if (httpCode === 0) {
+    return "无法连接";
+  }
+  if (httpCode === 403) {
+    return "被限制访问";
+  }
+  if (httpCode === 451) {
+    return "被法律限制";
+  }
+  if (isServer52xOr53x(httpCode)) {
+    return "服务器异常";
+  }
+  return "正常访问";
+}
+
+function isErrorHttpCode(httpCode) {
+  if (httpCode === 0 || httpCode === 403 || httpCode === 451) {
+    return true;
+  }
+  return isServer52xOr53x(httpCode);
+}
+
+async function checkOneDomain(domain) {
+  const url = `https://www.${domain}`;
+  try {
+    const response = await axios.get(url, {
+      maxRedirects: 5,
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    const httpCode = Number.isInteger(response.status) ? response.status : 0;
+    return {
+      domain,
+      http_code: httpCode,
+      status: isErrorHttpCode(httpCode) ? "ERROR" : "OK",
+      reason: getHttpStatusReason(httpCode),
+    };
+  } catch {
+    return {
+      domain,
+      http_code: 0,
+      status: "ERROR",
+      reason: getHttpStatusReason(0),
+    };
+  }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const size = Math.max(1, concurrency);
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const current = nextIndex;
+      nextIndex += 1;
+      if (current >= items.length) {
+        return;
+      }
+      results[current] = await mapper(items[current], current);
+    }
+  }
+
+  const workerCount = Math.min(size, items.length || 1);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+function formatGmt8DateTime(date) {
+  const formatter = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Singapore",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return formatter.format(date).replace(" ", " ");
+}
+
+function formatScanReport(country, results) {
+  const okRows = [];
+  const errorRows = [];
+  for (const row of results) {
+    if (row.status === "ERROR") {
+      errorRows.push(
+        `${row.domain}  状态：${row.reason} (code:${formatCode(row.http_code)})`
+      );
+      continue;
+    }
+    okRows.push(`${row.domain} (code:${formatCode(row.http_code)})`);
+  }
+
+  const lines = [
+    `🔎 即时检测结果：${country.toUpperCase()}`,
+    `时间：${formatGmt8DateTime(new Date())} (GMT+8)`,
+    "",
+    `🟢 正常 (${okRows.length})`,
+    ...(okRows.length > 0 ? okRows : ["(none)"]),
+    "",
+    `🔴 异常 (${errorRows.length})`,
+    ...(errorRows.length > 0 ? errorRows : ["(none)"]),
+    "",
+    `总计：${results.length} | 🟢 ${okRows.length} | 🔴 ${errorRows.length}`,
+  ];
+
+  let text = lines.join("\n");
+  if (text.length > TELEGRAM_MESSAGE_LIMIT) {
+    text = `${text.slice(0, TELEGRAM_MESSAGE_LIMIT - 20)}\n...(truncated)`;
+  }
+  return text;
+}
+
 function usageHelp() {
   return [
     "Commands:",
@@ -295,6 +509,8 @@ function usageHelp() {
     "/add <country> <domains...>",
     "/import <country> (domains on next lines)",
     "/remove <country> <domains...>",
+    "/move <from_country> <to_country> <domains...>",
+    "/scan <country>",
     "/list <country>",
     "/whoami",
     "/help",
@@ -532,6 +748,128 @@ async function main() {
           chatId,
           formatRemoveMessage(removedCount, country, skippedNotFound, invalidCount)
         );
+        return;
+      }
+
+      if (command === "/move") {
+        const { fromCountry, toCountry, payload } = parseMoveArgs(args);
+        if (!fromCountry || !toCountry) {
+          await bot.sendMessage(
+            chatId,
+            "Usage: /move <from_country> <to_country> <domains...>"
+          );
+          return;
+        }
+        if (!ALLOWED_COUNTRIES.has(fromCountry) || !ALLOWED_COUNTRIES.has(toCountry)) {
+          await bot.sendMessage(chatId, "Invalid country. Use: my, sg, th, np");
+          return;
+        }
+        if (fromCountry === toCountry) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Source and target country cannot be the same."
+          );
+          return;
+        }
+
+        const candidates = tokenizeAddPayload(payload);
+        if (candidates.length === 0) {
+          await bot.sendMessage(
+            chatId,
+            "Usage: /move <from_country> <to_country> <domains...>"
+          );
+          return;
+        }
+        if (candidates.length > MAX_INPUT_DOMAINS) {
+          await bot.sendMessage(chatId, "❌ Too many domains.");
+          return;
+        }
+
+        const [fromState, toState] = await Promise.all([
+          getCountryDomains(gh, ghOwner, ghRepo, ghBranch, fromCountry),
+          getCountryDomains(gh, ghOwner, ghRepo, ghBranch, toCountry),
+        ]);
+        const fromDomains = fromState.domains;
+        const toDomains = toState.domains;
+
+        const { normalized, invalidCount } = normalizeAndDedupCandidates(candidates);
+        const fromSet = new Set(fromDomains);
+        const toSet = new Set(toDomains);
+        const moved = [];
+        let skippedNotFound = 0;
+
+        for (const domain of normalized) {
+          if (!fromSet.has(domain)) {
+            skippedNotFound += 1;
+            continue;
+          }
+          moved.push(domain);
+          fromSet.delete(domain);
+          toSet.add(domain);
+        }
+
+        const movedCount = moved.length;
+        if (movedCount > 0) {
+          const updates = [
+            { country: fromCountry, domains: Array.from(fromSet).sort() },
+            { country: toCountry, domains: Array.from(toSet).sort() },
+          ];
+          const commitMessage = `bot: move ${movedCount} domains ${fromCountry} -> ${toCountry} by ${userId}`;
+          await commitCountryDomainUpdates(
+            gh,
+            ghOwner,
+            ghRepo,
+            ghBranch,
+            updates,
+            commitMessage
+          );
+        }
+
+        const lines = [
+          `✅ Moved ${movedCount} domains`,
+          `${fromCountry.toUpperCase()} → ${toCountry.toUpperCase()}`,
+        ];
+        if (skippedNotFound > 0) {
+          lines.push("");
+          lines.push(`⚠️ Skipped ${skippedNotFound} not found`);
+        }
+        if (invalidCount > 0) {
+          lines.push(`❌ Invalid skipped ${invalidCount} domains`);
+        }
+        await bot.sendMessage(chatId, lines.join("\n"));
+        return;
+      }
+
+      if (command === "/scan") {
+        const scanArgs = args.trim().split(/\s+/).filter(Boolean);
+        if (scanArgs.length !== 1) {
+          await bot.sendMessage(chatId, "Usage: /scan <country>");
+          return;
+        }
+        const country = scanArgs[0].toLowerCase();
+        if (!ALLOWED_COUNTRIES.has(country)) {
+          await bot.sendMessage(chatId, "Invalid country. Use: my, sg, th, np");
+          return;
+        }
+
+        const { domains } = await getCountryDomains(
+          gh,
+          ghOwner,
+          ghRepo,
+          ghBranch,
+          country
+        );
+        if (domains.length > MAX_INPUT_DOMAINS) {
+          await bot.sendMessage(chatId, "❌ Too many domains.");
+          return;
+        }
+
+        const scanResults = await mapWithConcurrency(
+          domains,
+          MAX_SCAN_CONCURRENCY,
+          checkOneDomain
+        );
+        await bot.sendMessage(chatId, formatScanReport(country, scanResults));
         return;
       }
     } catch (error) {

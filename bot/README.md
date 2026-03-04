@@ -8,6 +8,8 @@
 - `/add <country> <domains...>`（支持空格/逗号/换行批量）
 - `/import <country>`（命令下一行开始粘贴大批量域名）
 - `/remove <country> <domains...>`（支持空格/逗号/换行批量删除）
+- `/move <from_country> <to_country> <domains...>`（支持空格/逗号/换行批量移动）
+- `/scan <country>`（即时检测该国家列表，不写日志不提交 GitHub）
 - `/list <country>`
 - `/whoami`
 - `/help`
@@ -29,7 +31,7 @@
 
 `https://www.Google.com/test?a=1` -> `google.com`
 
-## 批量规则（/add /import /remove）
+## 批量规则（/add /import /remove /move）
 
 - 国家仅允许：`my`, `sg`, `th`, `np`
 - 单次最多处理 `500` 个 domain；超过返回：`❌ Too many domains.`
@@ -54,12 +56,38 @@
 ⚠️ Skipped 2 not found
 ```
 
+```text
+✅ Moved 5 domains
+SG → TH
+⚠️ Skipped 2 not found
+```
+
 ## 安全控制
 
 仅允许 `ALLOW_USERS` 中的 Telegram user_id 操作。  
 非白名单用户将收到：
 
 `❌ You are not authorized.`
+
+## /scan 即时检测
+
+- 用法：`/scan <country>`
+- 支持国家：`my`, `sg`, `th`, `np`
+- 读取 `lists/<country>.txt` 的 canonical domain 做即时检测
+- 检测 URL：`https://www.<domain>`，跟随跳转最多 5 次，超时 10 秒
+- 并发上限：10
+- 单次最多扫描：500 条（超过返回 `❌ Too many domains.`）
+- 结果分为 `🟢 正常` 与 `🔴 异常` 两组显示
+- 仅 `ALLOW_USERS` 白名单可执行
+- 结果仅回发当前会话，不会写 `records/ban_log.csv`，不会 commit/push，不触发 GitHub Actions
+
+状态映射：
+
+- `000` -> 无法连接
+- `403` -> 被限制访问
+- `451` -> 被法律限制
+- `52x/53x` -> 服务器异常
+- 其他 -> 正常访问
 
 ## 环境变量
 
@@ -154,6 +182,34 @@ google.com
 facebook.com
 ```
 
+### /move 批量移动
+
+空格分隔：
+
+```text
+/move sg th google.com facebook.com
+```
+
+逗号分隔：
+
+```text
+/move sg th google.com,facebook.com
+```
+
+换行分隔：
+
+```text
+/move sg th
+google.com
+facebook.com
+```
+
+### /scan 即时检测
+
+```text
+/scan sg
+```
+
 ## PM2
 
 ```bash
@@ -174,6 +230,7 @@ Bot 使用 GitHub REST Contents API：
    - `bot: add <N> domains to <country> by <user_id>`
    - `bot: import <N> domains to <country> by <user_id>`
    - `bot: remove <N> domains from <country> by <user_id>`
+   - `bot: move <N> domains <from_country> -> <to_country> by <user_id>`
 
 ## 测试步骤
 
