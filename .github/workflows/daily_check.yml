@@ -159,7 +159,6 @@ jobs:
               )
 
           daily_summary_file = out_dir / "telegram_daily_summary.txt"
-          alert_file = out_dir / "telegram_alert.txt"
 
           country_title = {
               "my": "🇲🇾 Malaysia",
@@ -244,26 +243,8 @@ jobs:
                   daily_text = daily_text[:3860] + "\n...(truncated)"
               daily_summary_file.write_text(daily_text, encoding="utf-8")
 
-              alert_lines = [
-                  "🚨 Website Access Anomaly Alert",
-                  f"Date: {TODAY}",
-                  "",
-              ]
-              for c in COUNTRIES:
-                  items = ban_by_country[c]
-                  if not items:
-                      continue
-                  alert_lines.append(country_title[c])
-                  for item in items:
-                      alert_lines.append(f"Domain: {item['domain']}")
-                  alert_lines.append("")
-              alert_text = "\n".join(alert_lines).strip()
-              if len(alert_text) > 3900:
-                  alert_text = alert_text[:3860] + "\n...(truncated)"
-              alert_file.write_text(alert_text, encoding="utf-8")
           else:
               daily_summary_file.write_text("", encoding="utf-8")
-              alert_file.write_text("", encoding="utf-8")
 
           github_output = os.environ["GITHUB_OUTPUT"]
           with open(github_output, "a", encoding="utf-8") as f:
@@ -282,14 +263,9 @@ jobs:
             exit 0
           fi
           DAILY_MESSAGE="$(cat out/telegram_daily_summary.txt)"
-          ALERT_MESSAGE="$(cat out/telegram_alert.txt)"
           curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" \
             --data-urlencode "text=${DAILY_MESSAGE}" \
-            --data-urlencode "disable_web_page_preview=true" > /dev/null
-          curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=${ALERT_MESSAGE}" \
             --data-urlencode "disable_web_page_preview=true" > /dev/null
 
       - name: Commit ban log
