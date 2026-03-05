@@ -2,8 +2,6 @@
 import argparse
 import csv
 import re
-from collections import defaultdict
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
 COUNTRIES = ["my", "sg", "th", "np"]
@@ -77,29 +75,6 @@ def append_ban_log(log_file: Path, rows: list[dict[str, str]]) -> None:
             writer.writerow({k: row[k] for k in LOG_FIELDS})
 
 
-def load_ban_dates(log_file: Path) -> dict[tuple[str, str], list[date]]:
-    result: dict[tuple[str, str], list[date]] = defaultdict(list)
-    if not log_file.exists() or log_file.stat().st_size == 0:
-        return result
-
-    with log_file.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if (row.get("status") or "").strip() != "BAN":
-                continue
-            country = (row.get("country") or "").strip()
-            domain = (row.get("domain") or "").strip()
-            raw_date = (row.get("date") or "").strip()
-            if not country or not domain:
-                continue
-            try:
-                parsed = datetime.strptime(raw_date, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-            result[(country, domain)].append(parsed)
-    return result
-
-
 def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> str:
     ok_by_country: dict[str, list[str]] = {c: [] for c in COUNTRIES}
     errors_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
@@ -128,9 +103,6 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
     err_count = sum(len(errors_by_country[c]) for c in COUNTRIES)
     total_count = ok_count + err_count
 
-    ban_dates = load_ban_dates(log_file)
-    today = datetime.strptime(day, "%Y-%m-%d").date()
-
     lines = [
         "📊 Daily Website Check Report",
         f"Date: {day}",
@@ -148,7 +120,8 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
             continue
         has_ok = True
         lines.append(COUNTRY_TITLES[country])
-        lines.extend(items)
+        for domain in items:
+            lines.append(f"Domain: {domain}")
         lines.append("")
     if not has_ok:
         lines.extend(["(none)", ""])
@@ -170,22 +143,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
         has_err = True
         lines.append(COUNTRY_TITLES[country])
         for item in items:
-            dates = ban_dates.get((country, item["domain"]), [])
-            if dates:
-                first_ban = min(dates).isoformat()
-                c7 = sum(1 for d in dates if d >= today - timedelta(days=6))
-                c30 = sum(1 for d in dates if d >= today - timedelta(days=29))
-                c365 = sum(1 for d in dates if d >= today - timedelta(days=364))
-                lines.append(
-                    "Domain: "
-                    f"{item['domain']} "
-                    f"[{item['http_code']} | {item['reason']}] "
-                    f"(first: {first_ban}, 7d:{c7}, 30d:{c30}, 365d:{c365})"
-                )
-            else:
-                lines.append(
-                    f"Domain: {item['domain']} [{item['http_code']} | {item['reason']}]"
-                )
+            lines.append(f"Domain: {item['domain']}")
         lines.append("")
     if not has_err:
         lines.extend(["(none)", ""])
