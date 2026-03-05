@@ -1,0 +1,14 @@
+[Unit]
+Description=DomainExpansion Daily Domain Check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/ubuntu/domainexpansion
+ExecStart=/bin/bash /home/ubuntu/domainexpansion/scripts/run_daily_check.sh
+
+[Install]
+WantedBy=multi-user.target

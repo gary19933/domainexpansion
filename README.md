@@ -209,3 +209,127 @@ python scripts/check_domains.py --country my
 ```bash
 python scripts/check_domains.py --country my --no-append-log --rows-output out/my_rows.csv
 ```
+
+## EC2 Scheduler (Systemd First)
+
+本项目已提供 EC2 本地调度版本，避免依赖 GitHub schedule：
+
+- 主脚本：`scripts/run_daily_check.sh`
+- 汇总脚本：`scripts/merge_summary.py`
+- systemd service：`deploy/systemd/domainexpansion-daily.service`
+- systemd timer：`deploy/systemd/domainexpansion-daily.timer`
+- cron 备用：`deploy/cron/domainexpansion.cron`
+
+### 1) Ubuntu 24.04 安装依赖
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip curl
+```
+
+### 2) 目录与权限
+
+```bash
+cd /home/ubuntu/domainexpansion
+mkdir -p out records
+sudo mkdir -p /var/log/domainexpansion
+sudo touch /var/log/domainexpansion/daily.log
+sudo chmod 755 /var/log/domainexpansion
+sudo chmod 644 /var/log/domainexpansion/daily.log
+chmod +x scripts/run_daily_check.sh
+```
+
+### 3) 服务器时区（GMT+8）
+
+```bash
+sudo timedatectl set-timezone Asia/Kuala_Lumpur
+timedatectl
+```
+
+### 4) 环境变量文件
+
+创建 `/etc/domainexpansion.env`（`root:root` + `600`）：
+
+```bash
+sudo tee /etc/domainexpansion.env >/dev/null <<'EOF'
+TG_BOT_TOKEN=123456789:replace_me
+TG_CHAT_ID=-1001234567890
+RES_PROXY_MY=http://user:pass@proxy-host:port
+RES_PROXY_SG=http://user:pass@proxy-host:port
+RES_PROXY_TH=http://user:pass@proxy-host:port
+RES_PROXY_NP=http://user:pass@proxy-host:port
+EOF
+sudo chown root:root /etc/domainexpansion.env
+sudo chmod 600 /etc/domainexpansion.env
+```
+
+### 5) 启用 systemd timer（推荐）
+
+```bash
+sudo cp deploy/systemd/domainexpansion-daily.service /etc/systemd/system/
+sudo cp deploy/systemd/domainexpansion-daily.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now domainexpansion-daily.timer
+sudo systemctl list-timers --all | grep domainexpansion
+```
+
+`domainexpansion-daily.timer` 默认每天 `08:00`（Asia/Kuala_Lumpur）触发。
+
+### 6) 备用 cron 方案
+
+若不用 systemd timer，可用 root crontab：
+
+```bash
+sudo crontab -e
+```
+
+加入这一行：
+
+```cron
+0 8 * * * /bin/bash /home/ubuntu/domainexpansion/scripts/run_daily_check.sh >> /var/log/domainexpansion/daily.log 2>&1
+```
+
+### 7) 手动运行与验证
+
+手动跑一次：
+
+```bash
+sudo /bin/bash /home/ubuntu/domainexpansion/scripts/run_daily_check.sh
+```
+
+查看最近 200 行日志：
+
+```bash
+tail -n 200 /var/log/domainexpansion/daily.log
+```
+
+查看本次输出：
+
+```bash
+ls -lah out/
+head -n 5 out/my_rows.csv
+head -n 5 out/sg_rows.csv
+head -n 5 out/th_rows.csv
+head -n 5 out/np_rows.csv
+cat out/telegram_daily_summary.txt
+```
+
+检查 systemd 最近执行记录：
+
+```bash
+sudo systemctl status domainexpansion-daily.timer
+sudo systemctl status domainexpansion-daily.service
+sudo journalctl -u domainexpansion-daily.service -n 200 --no-pager
+```
+
+### 8) PROXY_BLOCK / ERROR 识别
+
+`scripts/merge_summary.py` 会为每条行记录追加 `reason` 列（写回 `out/*_rows.csv`）：
+
+- `PROXY_BLOCK`：`403 / 407 / 451 / 52x / 53x`
+- `ERROR`：`000` 或其他失败状态
+- `OK`：可访问
+
+Telegram 汇总会显示 `http_code` 与 `reason`，例如：
+
+`Domain: example.com [403 | PROXY_BLOCK]`

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run DomainExpansion Daily Check at 08:00 Asia/Kuala_Lumpur
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+Unit=domainexpansion-daily.service
+
+[Install]
+WantedBy=timers.target

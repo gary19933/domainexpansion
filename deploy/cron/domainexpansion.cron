@@ -1,0 +1,3 @@
+# DomainExpansion fallback cron (run as root)
+# Ensure server timezone is Asia/Kuala_Lumpur.
+0 8 * * * /bin/bash /home/ubuntu/domainexpansion/scripts/run_daily_check.sh >> /var/log/domainexpansion/daily.log 2>&1
