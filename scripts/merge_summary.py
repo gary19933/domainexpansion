@@ -20,13 +20,13 @@ def infer_reason(http_code: str, status: str) -> str:
     code = (http_code or "").strip()
     if status == "OK":
         return "OK"
+    if code == "000":
+        return "NETWORK_ERROR"
     if code in {"403", "407", "451"}:
         return "PROXY_BLOCK"
     if re.fullmatch(r"52\d", code) or re.fullmatch(r"53\d", code):
         return "PROXY_BLOCK"
-    if code == "000":
-        return "ERROR"
-    return "ERROR"
+    return "NETWORK_ERROR"
 
 
 def load_country_rows(out_dir: Path, day: str) -> list[dict[str, str]]:
@@ -146,7 +146,9 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
         has_err = True
         lines.append(COUNTRY_TITLES[country])
         for item in items:
-            lines.append(f"Domain: {item['domain']}")
+            lines.append(
+                f"Domain: {item['domain']} [{item['http_code']} | {item['reason']}]"
+            )
         lines.append("")
     if not has_err:
         lines.extend(["(none)", ""])

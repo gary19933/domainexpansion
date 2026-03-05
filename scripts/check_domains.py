@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,7 +119,7 @@ def run_nslookup(domain: str, proxy_url: str = "") -> tuple[int, str]:
         return 124, "nslookup timeout"
 
 
-def run_curl_http_code(domain: str, proxy_url: str = "") -> str:
+def run_curl_probe(url: str, proxy_url: str = "") -> tuple[str, str, str]:
     cmd = ["curl"]
     if proxy_url:
         cmd.extend(["--proxy", proxy_url])
@@ -133,8 +134,8 @@ def run_curl_http_code(domain: str, proxy_url: str = "") -> str:
             os.devnull,
             "-sS",
             "-w",
-            "%{http_code}",
-            f"http://{domain}",
+            "%{http_code}\t%{url_effective}",
+            url,
         ]
     )
     try:
@@ -146,20 +147,31 @@ def run_curl_http_code(domain: str, proxy_url: str = "") -> str:
             check=False,
         )
         output = (proc.stdout or "").strip()
-        if re.fullmatch(r"\d{3}", output):
-            return output
-        match = re.search(r"(\d{3})", output)
-        if match:
-            return match.group(1)
-        return "000"
+        err = (proc.stderr or "").strip().lower()
+        if proc.returncode != 0 and not err:
+            err = f"curl_exit_{proc.returncode}"
+
+        code = "000"
+        effective_url = ""
+        if "\t" in output:
+            left, right = output.split("\t", 1)
+            left = left.strip()
+            if re.fullmatch(r"\d{3}", left):
+                code = left
+            effective_url = right.strip()
+        else:
+            match = re.search(r"(\d{3})", output)
+            if match:
+                code = match.group(1)
+        return code, effective_url, err
     except FileNotFoundError:
-        return "000"
+        return "000", "", "curl_not_found"
     except subprocess.TimeoutExpired:
-        return "000"
+        return "000", "", "timeout"
 
 
-def is_ban(http_code: str) -> bool:
-    if http_code in {"000", "403", "451"}:
+def is_block_code(http_code: str) -> bool:
+    if http_code in {"403", "407", "451"}:
         return True
     if re.fullmatch(r"52\d", http_code):
         return True
@@ -168,12 +180,27 @@ def is_ban(http_code: str) -> bool:
     return False
 
 
+def is_success_code(http_code: str) -> bool:
+    if not re.fullmatch(r"\d{3}", http_code):
+        return False
+    code = int(http_code)
+    return 200 <= code <= 399
+
+
+def matches_target_domain(target_domain: str, effective_url: str) -> bool:
+    if not effective_url:
+        return False
+    host = (urlparse(effective_url).hostname or "").strip(".").lower()
+    target = target_domain.strip(".").lower()
+    if not host or not target:
+        return False
+    return host == target or host.endswith("." + target)
+
+
 def infer_reason(http_code: str, status: str) -> str:
     if status == "OK":
         return "OK"
-    if http_code in {"403", "407", "451"}:
-        return "PROXY_BLOCK"
-    if re.fullmatch(r"52\d", http_code) or re.fullmatch(r"53\d", http_code):
+    if is_block_code(http_code):
         return "PROXY_BLOCK"
     if http_code == "000":
         return "NETWORK_ERROR"
@@ -205,7 +232,7 @@ def check_country(
     list_file: Path,
     day: str,
     proxy_url: str = "",
-    workers: int = 10,
+    workers: int = 2,
     retries: int = 2,
     dns_retries: int = 2,
 ) -> list[dict[str, str]]:
@@ -214,18 +241,75 @@ def check_country(
         return []
 
     workers = max(1, workers)
+    retries = max(1, retries)
+    dns_retries = max(1, dns_retries)
+
+    def dns_ok(domain: str) -> bool:
+        for attempt in range(dns_retries):
+            rc, _ = run_nslookup(domain, proxy_url)
+            if rc == 0:
+                return True
+            if attempt < dns_retries - 1:
+                time.sleep(0.2)
+        return False
+
+    def probe_with_retries(domain: str, url: str) -> tuple[bool, bool, bool, str]:
+        has_success = False
+        has_block = False
+        has_mismatch = False
+        best_code = "000"
+        for attempt in range(retries):
+            code, effective_url, _ = run_curl_probe(url, proxy_url)
+            if best_code == "000" and code != "000":
+                best_code = code
+            if is_success_code(code):
+                if matches_target_domain(domain, effective_url):
+                    has_success = True
+                    if best_code == "000":
+                        best_code = code
+                    break
+                has_mismatch = True
+            if is_block_code(code):
+                has_block = True
+            if attempt < retries - 1:
+                time.sleep(0.2)
+        return has_success, has_block, has_mismatch, best_code
 
     def check_one_domain(domain: str) -> dict[str, str]:
-        run_nslookup(domain, proxy_url)
-        http_code = run_curl_http_code(domain, proxy_url)
-        status = "BAN" if is_ban(http_code) else "OK"
+        resolved = dns_ok(domain)
+        https_ok, https_block, https_mismatch, https_code = probe_with_retries(
+            domain, f"https://{domain}"
+        )
+        http_ok, http_block, http_mismatch, http_code = probe_with_retries(
+            domain, f"http://{domain}"
+        )
+
+        final_http_code = next(
+            (code for code in (https_code, http_code) if code != "000"),
+            "000",
+        )
+
+        if https_ok or http_ok:
+            status = "OK"
+            reason = "OK"
+        else:
+            status = "BAN"
+            if https_block or http_block:
+                reason = "PROXY_BLOCK"
+            elif https_mismatch or http_mismatch:
+                reason = "NETWORK_ERROR"
+            elif not resolved:
+                reason = "DNS_FAIL"
+            else:
+                reason = "NETWORK_ERROR"
+
         return {
             "date": day,
             "country": country,
             "domain": domain,
-            "http_code": http_code,
+            "http_code": final_http_code,
             "status": status,
-            "reason": infer_reason(http_code, status),
+            "reason": reason,
         }
 
     max_workers = min(workers, len(domains))
@@ -242,7 +326,9 @@ def main() -> None:
     parser.add_argument("--list-file", type=Path)
     parser.add_argument("--log-file", type=Path, default=Path("records/ban_log.csv"))
     parser.add_argument("--rows-output", type=Path)
-    parser.add_argument("--date", default=datetime.now(timezone.utc).date().isoformat())
+    parser.add_argument(
+        "--date", default=datetime.now(timezone.utc).date().isoformat()
+    )
     parser.add_argument(
         "--no-append-log",
         action="store_true",
@@ -256,20 +342,20 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=int(os.getenv("CHECK_WORKERS", "10")),
-        help="Concurrent workers per country (default: 10 or CHECK_WORKERS env).",
+        default=int(os.getenv("CHECK_WORKERS", "2")),
+        help="Concurrent workers per country (default: 2 or CHECK_WORKERS env).",
     )
     parser.add_argument(
         "--retries",
         type=int,
         default=int(os.getenv("CHECK_RETRIES", "2")),
-        help="Reserved for compatibility with existing runtime env.",
+        help="HTTP retries per protocol (default: 2 or CHECK_RETRIES env).",
     )
     parser.add_argument(
         "--dns-retries",
         type=int,
         default=int(os.getenv("DNS_RETRIES", "2")),
-        help="Reserved for compatibility with existing runtime env.",
+        help="DNS retries per domain (default: 2 or DNS_RETRIES env).",
     )
     args = parser.parse_args()
 
