@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 
 ALLOWED_COUNTRIES = {"my", "sg", "th", "np"}
 LOG_FIELDS = ["date", "country", "domain", "http_code", "status"]
+ROW_FIELDS = ["date", "country", "domain", "http_code", "status", "reason"]
 LABEL_RE = re.compile(r"^[a-z0-9-]{1,63}$")
 IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
@@ -117,7 +119,7 @@ def run_nslookup(domain: str, proxy_url: str = "") -> tuple[int, str]:
         return 124, "nslookup timeout"
 
 
-def run_curl_http_code(url: str, proxy_url: str = "") -> str:
+def run_curl_http_code(url: str, proxy_url: str = "") -> tuple[str, str]:
     cmd = ["curl"]
     if proxy_url:
         cmd.extend(["--proxy", proxy_url])
@@ -143,20 +145,23 @@ def run_curl_http_code(url: str, proxy_url: str = "") -> str:
             check=False,
         )
         output = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip().lower()
+        if proc.returncode != 0 and not err:
+            err = f"curl_exit_{proc.returncode}"
         if re.fullmatch(r"\d{3}", output):
-            return output
+            return output, err
         match = re.search(r"(\d{3})", output)
         if match:
-            return match.group(1)
-        return "000"
+            return match.group(1), err
+        return "000", err or "no_http_code"
     except FileNotFoundError:
-        return "000"
+        return "000", "curl_not_found"
     except subprocess.TimeoutExpired:
-        return "000"
+        return "000", "timeout"
 
 
-def is_ban(http_code: str) -> bool:
-    if http_code in {"000", "403", "451"}:
+def is_block_code(http_code: str) -> bool:
+    if http_code in {"403", "407", "451"}:
         return True
     if re.fullmatch(r"52\d", http_code):
         return True
@@ -165,10 +170,20 @@ def is_ban(http_code: str) -> bool:
     return False
 
 
+def is_success_code(http_code: str) -> bool:
+    if http_code == "000":
+        return False
+    if not re.fullmatch(r"\d{3}", http_code):
+        return False
+    if is_block_code(http_code):
+        return False
+    return True
+
+
 def write_rows_csv(rows_output: Path, rows: list[dict[str, str]]) -> None:
     rows_output.parent.mkdir(parents=True, exist_ok=True)
     with rows_output.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=ROW_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -190,23 +205,63 @@ def check_country(
     day: str,
     proxy_url: str = "",
     workers: int = 10,
+    retries: int = 2,
+    dns_retries: int = 2,
 ) -> list[dict[str, str]]:
     domains = load_domains(list_file)
     if not domains:
         return []
 
     workers = max(1, workers)
+    retries = max(1, retries)
+    dns_retries = max(1, dns_retries)
+
+    def dns_ok(domain: str) -> bool:
+        for attempt in range(dns_retries):
+            rc, _ = run_nslookup(domain, proxy_url)
+            if rc == 0:
+                return True
+            if attempt < dns_retries - 1:
+                time.sleep(0.2)
+        return False
+
+    def probe_with_retries(url: str) -> tuple[bool, bool, str]:
+        has_success = False
+        has_block = False
+        best_code = "000"
+        for attempt in range(retries):
+            code, _ = run_curl_http_code(url, proxy_url)
+            if best_code == "000" and code != "000":
+                best_code = code
+            if is_success_code(code):
+                has_success = True
+                if best_code == "000":
+                    best_code = code
+                break
+            if is_block_code(code):
+                has_block = True
+            if attempt < retries - 1:
+                time.sleep(0.2)
+        return has_success, has_block, best_code
 
     def check_one_domain(domain: str) -> dict[str, str]:
-        run_nslookup(domain, proxy_url)
-        https_code = run_curl_http_code(f"https://{domain}", proxy_url)
-        http_code = run_curl_http_code(f"http://{domain}", proxy_url)
+        resolved = dns_ok(domain)
+        https_ok, https_block, https_code = probe_with_retries(f"https://{domain}")
+        http_ok, http_block, http_code = probe_with_retries(f"http://{domain}")
 
-        final_http_code = next(
-            (code for code in (https_code, http_code) if code != "000"),
-            "000",
-        )
-        status = "BAN" if is_ban(https_code) and is_ban(http_code) else "OK"
+        final_http_code = next((code for code in (https_code, http_code) if code != "000"), "000")
+
+        if https_ok or http_ok:
+            status = "OK"
+            reason = "OK"
+        else:
+            status = "BAN"
+            if https_block or http_block:
+                reason = "PROXY_BLOCK"
+            elif not resolved:
+                reason = "DNS_FAIL"
+            else:
+                reason = "NETWORK_ERROR"
 
         return {
             "date": day,
@@ -214,6 +269,7 @@ def check_country(
             "domain": domain,
             "http_code": final_http_code,
             "status": status,
+            "reason": reason,
         }
 
     max_workers = min(workers, len(domains))
@@ -249,13 +305,33 @@ def main() -> None:
         default=int(os.getenv("CHECK_WORKERS", "10")),
         help="Concurrent workers per country (default: 10 or CHECK_WORKERS env).",
     )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=int(os.getenv("CHECK_RETRIES", "2")),
+        help="HTTP retries per protocol (default: 2 or CHECK_RETRIES env).",
+    )
+    parser.add_argument(
+        "--dns-retries",
+        type=int,
+        default=int(os.getenv("DNS_RETRIES", "2")),
+        help="DNS retries per domain (default: 2 or DNS_RETRIES env).",
+    )
     args = parser.parse_args()
 
     list_file = args.list_file or Path("lists") / f"{args.country}.txt"
     rows_output = args.rows_output or Path("out") / f"{args.country}_rows.csv"
     proxy_url = (args.proxy_url or "").strip()
 
-    rows = check_country(args.country, list_file, args.date, proxy_url, args.workers)
+    rows = check_country(
+        args.country,
+        list_file,
+        args.date,
+        proxy_url,
+        args.workers,
+        args.retries,
+        args.dns_retries,
+    )
     write_rows_csv(rows_output, rows)
     if not args.no_append_log:
         append_log(args.log_file, rows)

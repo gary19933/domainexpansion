@@ -45,9 +45,12 @@ def load_country_rows(out_dir: Path, day: str) -> list[dict[str, str]]:
                     "domain": (row.get("domain") or "").strip(),
                     "http_code": (row.get("http_code") or "000").strip() or "000",
                     "status": (row.get("status") or "BAN").strip() or "BAN",
-                    "reason": infer_reason(
-                        (row.get("http_code") or "000").strip() or "000",
-                        (row.get("status") or "BAN").strip() or "BAN",
+                    "reason": (
+                        (row.get("reason") or "").strip()
+                        or infer_reason(
+                            (row.get("http_code") or "000").strip() or "000",
+                            (row.get("status") or "BAN").strip() or "BAN",
+                        )
                     ),
                 }
                 normalized.append(item)
