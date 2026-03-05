@@ -43,8 +43,10 @@ mkdir -p out records
 
 RUN_DATE="$(TZ=Asia/Kuala_Lumpur date '+%Y-%m-%d')"
 COUNTRIES=(my sg th np)
+COUNTRY_SLEEP_SECONDS="${COUNTRY_SLEEP_SECONDS:-10}"
 
-for country in "${COUNTRIES[@]}"; do
+for i in "${!COUNTRIES[@]}"; do
+  country="${COUNTRIES[$i]}"
   upper_country="$(echo "$country" | tr '[:lower:]' '[:upper:]')"
   proxy_var="RES_PROXY_${upper_country}"
   proxy_url="${!proxy_var:-}"
@@ -58,6 +60,11 @@ for country in "${COUNTRIES[@]}"; do
     --no-append-log \
     --date "$RUN_DATE" \
     --proxy-url "$proxy_url"
+
+  if (( i < ${#COUNTRIES[@]} - 1 )) && (( COUNTRY_SLEEP_SECONDS > 0 )); then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] sleeping ${COUNTRY_SLEEP_SECONDS}s before next country"
+    sleep "$COUNTRY_SLEEP_SECONDS"
+  fi
 done
 
 python3 scripts/merge_summary.py \
