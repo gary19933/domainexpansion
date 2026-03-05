@@ -116,7 +116,7 @@ def run_nslookup(domain: str, proxy_url: str = "") -> tuple[int, str]:
         return 124, "nslookup timeout"
 
 
-def run_curl_http_code(domain: str, proxy_url: str = "") -> str:
+def run_curl_http_code(url: str, proxy_url: str = "") -> str:
     cmd = ["curl"]
     if proxy_url:
         cmd.extend(["--proxy", proxy_url])
@@ -131,7 +131,7 @@ def run_curl_http_code(domain: str, proxy_url: str = "") -> str:
         "-sS",
         "-w",
         "%{http_code}",
-        f"http://{domain}",
+        url,
     ])
     try:
         proc = subprocess.run(
@@ -189,15 +189,30 @@ def check_country(
     domains = load_domains(list_file)
     rows: list[dict[str, str]] = []
     for domain in domains:
-        run_nslookup(domain, proxy_url)
-        http_code = run_curl_http_code(domain, proxy_url)
-        status = "BAN" if is_ban(http_code) else "OK"
+        dns_rc, _ = run_nslookup(domain, proxy_url)
+        https_code = run_curl_http_code(f"https://{domain}", proxy_url)
+        http_code = run_curl_http_code(f"http://{domain}", proxy_url)
+
+        if dns_rc != 0:
+            final_http_code = "000"
+            status = "BAN"
+        else:
+            final_http_code = next(
+                (code for code in (https_code, http_code) if code != "000"),
+                "000",
+            )
+            status = (
+                "BAN"
+                if is_ban(https_code) and is_ban(http_code)
+                else "OK"
+            )
+
         rows.append(
             {
                 "date": day,
                 "country": country,
                 "domain": domain,
-                "http_code": http_code,
+                "http_code": final_http_code,
                 "status": status,
             }
         )
