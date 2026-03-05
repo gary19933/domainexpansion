@@ -2,8 +2,8 @@ name: Daily Domain Check
 
 on:
   schedule:
-    # Runs daily at 08:00 GMT+8 (00:00 UTC)
-    - cron: "0 0 * * *"
+    # Runs daily at 10:45 GMT+8 (02:45 UTC)
+    - cron: "45 2 * * *"
   workflow_dispatch:
 
 permissions:
