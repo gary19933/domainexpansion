@@ -181,9 +181,8 @@ def is_success_code(http_code: str) -> bool:
         return False
     if not re.fullmatch(r"\d{3}", http_code):
         return False
-    if is_block_code(http_code):
-        return False
-    return True
+    code = int(http_code)
+    return 200 <= code <= 399
 
 
 def matches_target_domain(target_domain: str, effective_url: str) -> bool:
