@@ -2,8 +2,8 @@ name: Daily Domain Check
 
 on:
   schedule:
-    # Runs daily at 11:00 GMT+8 (03:00 UTC)
-    - cron: "0 3 * * *"
+    # TEMP TEST: runs every 5 minutes. Change back after verification.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -61,6 +61,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Debug trigger
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "SGT now: $(TZ=Asia/Singapore date '+%Y-%m-%d %H:%M:%S %Z')"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -244,7 +252,18 @@ jobs:
               daily_summary_file.write_text(daily_text, encoding="utf-8")
 
           else:
-              daily_summary_file.write_text("", encoding="utf-8")
+              daily_summary_file.write_text(
+                  "\n".join(
+                      [
+                          "📊 Daily Website Check Report",
+                          f"Date: {TODAY}",
+                          "",
+                          "Status: All OK",
+                          "🔴 Errors: 0",
+                      ]
+                  ),
+                  encoding="utf-8",
+              )
 
           github_output = os.environ["GITHUB_OUTPUT"]
           with open(github_output, "a", encoding="utf-8") as f:
@@ -253,7 +272,6 @@ jobs:
           PY
 
       - name: Send Telegram notification
-        if: steps.merge.outputs.has_anomalies == 'true'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
