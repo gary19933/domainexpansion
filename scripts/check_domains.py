@@ -119,7 +119,7 @@ def run_nslookup(domain: str, proxy_url: str = "") -> tuple[int, str]:
         return 124, "nslookup timeout"
 
 
-def run_curl_http_code(url: str, proxy_url: str = "") -> tuple[str, str]:
+def run_curl_probe(url: str, proxy_url: str = "") -> tuple[str, str, str]:
     cmd = ["curl"]
     if proxy_url:
         cmd.extend(["--proxy", proxy_url])
@@ -133,7 +133,7 @@ def run_curl_http_code(url: str, proxy_url: str = "") -> tuple[str, str]:
         os.devnull,
         "-sS",
         "-w",
-        "%{http_code}",
+        "%{http_code}\t%{url_effective}",
         url,
     ])
     try:
@@ -148,16 +148,22 @@ def run_curl_http_code(url: str, proxy_url: str = "") -> tuple[str, str]:
         err = (proc.stderr or "").strip().lower()
         if proc.returncode != 0 and not err:
             err = f"curl_exit_{proc.returncode}"
-        if re.fullmatch(r"\d{3}", output):
-            return output, err
-        match = re.search(r"(\d{3})", output)
-        if match:
-            return match.group(1), err
-        return "000", err or "no_http_code"
+        code = "000"
+        effective_url = ""
+        if "\t" in output:
+            left, right = output.split("\t", 1)
+            effective_url = right.strip()
+            if re.fullmatch(r"\d{3}", left.strip()):
+                code = left.strip()
+        else:
+            match = re.search(r"(\d{3})", output)
+            if match:
+                code = match.group(1)
+        return code, effective_url, err or ""
     except FileNotFoundError:
-        return "000", "curl_not_found"
+        return "000", "", "curl_not_found"
     except subprocess.TimeoutExpired:
-        return "000", "timeout"
+        return "000", "", "timeout"
 
 
 def is_block_code(http_code: str) -> bool:
@@ -178,6 +184,16 @@ def is_success_code(http_code: str) -> bool:
     if is_block_code(http_code):
         return False
     return True
+
+
+def matches_target_domain(target_domain: str, effective_url: str) -> bool:
+    if not effective_url:
+        return False
+    host = (urlparse(effective_url).hostname or "").strip(".").lower()
+    target = target_domain.strip(".").lower()
+    if not host or not target:
+        return False
+    return host == target or host.endswith("." + target)
 
 
 def write_rows_csv(rows_output: Path, rows: list[dict[str, str]]) -> None:
@@ -225,29 +241,36 @@ def check_country(
                 time.sleep(0.2)
         return False
 
-    def probe_with_retries(url: str) -> tuple[bool, bool, str]:
+    def probe_with_retries(domain: str, url: str) -> tuple[bool, bool, bool, str]:
         has_success = False
         has_block = False
+        has_mismatch = False
         best_code = "000"
         for attempt in range(retries):
-            code, _ = run_curl_http_code(url, proxy_url)
+            code, effective_url, _ = run_curl_probe(url, proxy_url)
             if best_code == "000" and code != "000":
                 best_code = code
-            if is_success_code(code):
+            if is_success_code(code) and matches_target_domain(domain, effective_url):
                 has_success = True
                 if best_code == "000":
                     best_code = code
                 break
+            if is_success_code(code) and not matches_target_domain(domain, effective_url):
+                has_mismatch = True
             if is_block_code(code):
                 has_block = True
             if attempt < retries - 1:
                 time.sleep(0.2)
-        return has_success, has_block, best_code
+        return has_success, has_block, has_mismatch, best_code
 
     def check_one_domain(domain: str) -> dict[str, str]:
         resolved = dns_ok(domain)
-        https_ok, https_block, https_code = probe_with_retries(f"https://{domain}")
-        http_ok, http_block, http_code = probe_with_retries(f"http://{domain}")
+        https_ok, https_block, https_mismatch, https_code = probe_with_retries(
+            domain, f"https://{domain}"
+        )
+        http_ok, http_block, http_mismatch, http_code = probe_with_retries(
+            domain, f"http://{domain}"
+        )
 
         final_http_code = next((code for code in (https_code, http_code) if code != "000"), "000")
 
@@ -258,6 +281,8 @@ def check_country(
             status = "BAN"
             if https_block or http_block:
                 reason = "PROXY_BLOCK"
+            elif https_mismatch or http_mismatch:
+                reason = "NETWORK_ERROR"
             elif not resolved:
                 reason = "DNS_FAIL"
             else:
