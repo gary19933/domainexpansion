@@ -62,3 +62,12 @@ date,country,domain,http_code,status
 2026-03-04,sg,google.com,000,BAN
 2026-03-04,sg,hh.com,000,BAN
 2026-03-04,sg,telegram.com,000,BAN
+2026-03-05,my,google.com,000,BAN
+2026-03-05,my,facebook.com,000,BAN
+2026-03-05,my,abc-this-will-fail-999999.com,000,BAN
+2026-03-05,sg,abc.com,000,BAN
+2026-03-05,sg,cc.com,000,BAN
+2026-03-05,sg,facebook.com,000,BAN
+2026-03-05,sg,google.com,000,BAN
+2026-03-05,sg,hh.com,000,BAN
+2026-03-05,sg,telegram.com,000,BAN
