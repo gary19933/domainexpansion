@@ -1,9 +1,6 @@
 name: Daily Domain Check
 
 on:
-  schedule:
-    # TEMP TEST: runs every 5 minutes. Change back after verification.
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
