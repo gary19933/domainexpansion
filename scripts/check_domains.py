@@ -198,19 +198,15 @@ def check_country(
     workers = max(1, workers)
 
     def check_one_domain(domain: str) -> dict[str, str]:
-        dns_rc, _ = run_nslookup(domain, proxy_url)
+        run_nslookup(domain, proxy_url)
         https_code = run_curl_http_code(f"https://{domain}", proxy_url)
         http_code = run_curl_http_code(f"http://{domain}", proxy_url)
 
-        if dns_rc != 0:
-            final_http_code = "000"
-            status = "BAN"
-        else:
-            final_http_code = next(
-                (code for code in (https_code, http_code) if code != "000"),
-                "000",
-            )
-            status = "BAN" if is_ban(https_code) and is_ban(http_code) else "OK"
+        final_http_code = next(
+            (code for code in (https_code, http_code) if code != "000"),
+            "000",
+        )
+        status = "BAN" if is_ban(https_code) and is_ban(http_code) else "OK"
 
         return {
             "date": day,
