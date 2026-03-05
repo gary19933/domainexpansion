@@ -11,10 +11,10 @@ LOG_FIELDS = ["date", "country", "domain", "http_code", "status"]
 ROW_FIELDS = ["date", "country", "domain", "http_code", "status", "reason"]
 
 COUNTRY_TITLES = {
-    "my": "Malaysia",
-    "sg": "Singapore",
-    "th": "Thailand",
-    "np": "Nepal",
+    "my": "🇲🇾 Malaysia",
+    "sg": "🇸🇬 Singapore",
+    "th": "🇹🇭 Thailand",
+    "np": "🇳🇵 Nepal",
 }
 
 
@@ -132,12 +132,12 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
     today = datetime.strptime(day, "%Y-%m-%d").date()
 
     lines = [
-        "Daily Website Check Report",
+        "📊 Daily Website Check Report",
         f"Date: {day}",
         "",
-        "--------------------",
-        f"Reachable ({ok_count})",
-        "--------------------",
+        "————————————",
+        f"🟢 Reachable ({ok_count})",
+        "————————————",
         "",
     ]
 
@@ -155,9 +155,9 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
 
     lines.extend(
         [
-            "--------------------",
-            f"Errors ({err_count})",
-            "--------------------",
+            "————————————",
+            f"🔴 Errors ({err_count})",
+            "————————————",
             "",
         ]
     )
@@ -192,10 +192,10 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
 
     lines.extend(
         [
-            "--------------------",
+            "————————————",
             f"Total: {total_count}",
-            f"Reachable: {ok_count}",
-            f"Errors: {err_count}",
+            f"🟢 Reachable: {ok_count}",
+            f"🔴 Errors: {err_count}",
         ]
     )
     text = "\n".join(lines)
