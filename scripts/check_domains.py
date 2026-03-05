@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -184,11 +185,19 @@ def append_log(log_file: Path, rows: list[dict[str, str]]) -> None:
 
 
 def check_country(
-    country: str, list_file: Path, day: str, proxy_url: str = ""
+    country: str,
+    list_file: Path,
+    day: str,
+    proxy_url: str = "",
+    workers: int = 10,
 ) -> list[dict[str, str]]:
     domains = load_domains(list_file)
-    rows: list[dict[str, str]] = []
-    for domain in domains:
+    if not domains:
+        return []
+
+    workers = max(1, workers)
+
+    def check_one_domain(domain: str) -> dict[str, str]:
         dns_rc, _ = run_nslookup(domain, proxy_url)
         https_code = run_curl_http_code(f"https://{domain}", proxy_url)
         http_code = run_curl_http_code(f"http://{domain}", proxy_url)
@@ -201,21 +210,19 @@ def check_country(
                 (code for code in (https_code, http_code) if code != "000"),
                 "000",
             )
-            status = (
-                "BAN"
-                if is_ban(https_code) and is_ban(http_code)
-                else "OK"
-            )
+            status = "BAN" if is_ban(https_code) and is_ban(http_code) else "OK"
 
-        rows.append(
-            {
-                "date": day,
-                "country": country,
-                "domain": domain,
-                "http_code": final_http_code,
-                "status": status,
-            }
-        )
+        return {
+            "date": day,
+            "country": country,
+            "domain": domain,
+            "http_code": final_http_code,
+            "status": status,
+        }
+
+    max_workers = min(workers, len(domains))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        rows = list(executor.map(check_one_domain, domains))
     return rows
 
 
@@ -240,13 +247,19 @@ def main() -> None:
         default=(os.getenv("RES_PROXY_URL", "").strip()),
         help="Optional proxy URL. Also reads RES_PROXY_URL env var.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.getenv("CHECK_WORKERS", "10")),
+        help="Concurrent workers per country (default: 10 or CHECK_WORKERS env).",
+    )
     args = parser.parse_args()
 
     list_file = args.list_file or Path("lists") / f"{args.country}.txt"
     rows_output = args.rows_output or Path("out") / f"{args.country}_rows.csv"
     proxy_url = (args.proxy_url or "").strip()
 
-    rows = check_country(args.country, list_file, args.date, proxy_url)
+    rows = check_country(args.country, list_file, args.date, proxy_url, args.workers)
     write_rows_csv(rows_output, rows)
     if not args.no_append_log:
         append_log(args.log_file, rows)
