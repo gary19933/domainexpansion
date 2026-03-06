@@ -233,6 +233,8 @@ def check_country(
     day: str,
     proxy_url: str = "",
     workers: int = 2,
+    attempts: int = 5,
+    control_domain: str = "google.com",
     retries: int = 2,
     dns_retries: int = 2,
 ) -> list[dict[str, str]]:
@@ -241,8 +243,25 @@ def check_country(
         return []
 
     workers = max(1, workers)
+    attempts = max(1, attempts)
     retries = max(1, retries)
     dns_retries = max(1, dns_retries)
+    required_success = attempts // 2 + 1
+
+    def probe_once(target_domain: str, url: str) -> tuple[bool, bool, str]:
+        has_block = False
+        best_code = "000"
+        for retry_idx in range(retries):
+            code, effective_url, _ = run_curl_probe(url, proxy_url)
+            if best_code == "000" and code != "000":
+                best_code = code
+            if is_block_code(code):
+                has_block = True
+            if is_success_code(code) and matches_target_domain(target_domain, effective_url):
+                return True, has_block, code
+            if retry_idx < retries - 1:
+                time.sleep(0.1)
+        return False, has_block, best_code
 
     def dns_ok(domain: str) -> bool:
         for attempt in range(dns_retries):
@@ -253,55 +272,40 @@ def check_country(
                 time.sleep(0.2)
         return False
 
-    def probe_with_retries(domain: str, url: str) -> tuple[bool, bool, bool, str]:
-        has_success = False
-        has_block = False
-        has_mismatch = False
-        best_code = "000"
-        for attempt in range(retries):
-            code, effective_url, _ = run_curl_probe(url, proxy_url)
-            if best_code == "000" and code != "000":
-                best_code = code
-            if is_success_code(code):
-                if matches_target_domain(domain, effective_url):
-                    has_success = True
-                    if best_code == "000":
-                        best_code = code
-                    break
-                has_mismatch = True
-            if is_block_code(code):
-                has_block = True
-            if attempt < retries - 1:
-                time.sleep(0.2)
-        return has_success, has_block, has_mismatch, best_code
-
     def check_one_domain(domain: str) -> dict[str, str]:
         resolved = dns_ok(domain)
-        https_ok, https_block, https_mismatch, https_code = probe_with_retries(
-            domain, f"https://{domain}"
-        )
-        http_ok, http_block, http_mismatch, http_code = probe_with_retries(
-            domain, f"http://{domain}"
-        )
+        target_success = 0
+        target_block = 0
+        control_success = 0
+        target_codes: list[str] = []
 
-        final_http_code = next(
-            (code for code in (https_code, http_code) if code != "000"),
-            "000",
-        )
+        for attempt_idx in range(attempts):
+            ok_t, block_t, code_t = probe_once(domain, f"https://{domain}")
+            ok_c, _, _ = probe_once(control_domain, f"https://{control_domain}")
 
-        if https_ok or http_ok:
+            target_success += 1 if ok_t else 0
+            target_block += 1 if block_t else 0
+            control_success += 1 if ok_c else 0
+            target_codes.append(code_t)
+
+            if attempt_idx < attempts - 1:
+                time.sleep(0.2)
+
+        final_http_code = next((code for code in target_codes if code != "000"), "000")
+
+        if target_success >= required_success:
             status = "OK"
             reason = "OK"
         else:
             status = "BAN"
-            if https_block or http_block:
+            if control_success < required_success:
+                reason = "PROXY_ERROR"
+            elif target_block >= required_success:
                 reason = "PROXY_BLOCK"
-            elif https_mismatch or http_mismatch:
-                reason = "NETWORK_ERROR"
             elif not resolved:
                 reason = "DNS_FAIL"
             else:
-                reason = "NETWORK_ERROR"
+                reason = "LIKELY_BANNED"
 
         return {
             "date": day,
@@ -346,6 +350,17 @@ def main() -> None:
         help="Concurrent workers per country (default: 2 or CHECK_WORKERS env).",
     )
     parser.add_argument(
+        "--attempts",
+        type=int,
+        default=int(os.getenv("CHECK_ATTEMPTS", "5")),
+        help="Attempts per domain and control-domain majority vote (default: 5).",
+    )
+    parser.add_argument(
+        "--control-domain",
+        default=(os.getenv("CONTROL_DOMAIN", "google.com").strip() or "google.com"),
+        help="Control domain used to detect proxy health (default: google.com).",
+    )
+    parser.add_argument(
         "--retries",
         type=int,
         default=int(os.getenv("CHECK_RETRIES", "2")),
@@ -369,6 +384,8 @@ def main() -> None:
         args.date,
         proxy_url,
         args.workers,
+        args.attempts,
+        args.control_domain,
         args.retries,
         args.dns_retries,
     )
