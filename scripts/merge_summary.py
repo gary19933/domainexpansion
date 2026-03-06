@@ -19,14 +19,16 @@ COUNTRY_TITLES = {
 def infer_reason(http_code: str, status: str) -> str:
     code = (http_code or "").strip()
     if status == "OK":
-        return "OK"
+        return "REACHABLE"
+    if status == "ERROR":
+        return "PROXY_DEAD"
     if code == "000":
         return "NETWORK_ERROR"
     if code in {"403", "407", "451"}:
         return "PROXY_BLOCK"
     if re.fullmatch(r"52\d", code) or re.fullmatch(r"53\d", code):
         return "PROXY_BLOCK"
-    return "NETWORK_ERROR"
+    return "LIKELY_BANNED"
 
 
 def load_country_rows(out_dir: Path, day: str) -> list[dict[str, str]]:
@@ -79,32 +81,33 @@ def append_ban_log(log_file: Path, rows: list[dict[str, str]]) -> None:
 
 
 def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> str:
-    ok_by_country: dict[str, list[str]] = {c: [] for c in COUNTRIES}
-    errors_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
+    ok_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
+    ban_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
+    err_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
 
-    unique_ok = set()
-    unique_error: dict[tuple[str, str], dict[str, str]] = {}
+    unique_rows: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
-        country = row["country"]
-        domain = row["domain"]
-        if row["status"] == "OK":
-            key = (country, domain)
-            if key not in unique_ok:
-                unique_ok.add(key)
-                ok_by_country[country].append(domain)
-            continue
-        unique_error[(country, domain)] = row
+        unique_rows[(row["country"], row["domain"])] = row
 
-    for row in unique_error.values():
-        errors_by_country[row["country"]].append(row)
+    for row in unique_rows.values():
+        country = row["country"]
+        status = row["status"]
+        if status == "OK":
+            ok_by_country[country].append(row)
+        elif status == "BAN":
+            ban_by_country[country].append(row)
+        else:
+            err_by_country[country].append(row)
 
     for country in COUNTRIES:
-        ok_by_country[country].sort()
-        errors_by_country[country].sort(key=lambda x: x["domain"])
+        ok_by_country[country].sort(key=lambda x: x["domain"])
+        ban_by_country[country].sort(key=lambda x: x["domain"])
+        err_by_country[country].sort(key=lambda x: x["domain"])
 
     ok_count = sum(len(ok_by_country[c]) for c in COUNTRIES)
-    err_count = sum(len(errors_by_country[c]) for c in COUNTRIES)
-    total_count = ok_count + err_count
+    ban_count = sum(len(ban_by_country[c]) for c in COUNTRIES)
+    err_count = sum(len(err_by_country[c]) for c in COUNTRIES)
+    total_count = ok_count + ban_count + err_count
 
     lines = [
         "📊 Daily Website Check Report",
@@ -123,8 +126,11 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
             continue
         has_ok = True
         lines.append(COUNTRY_TITLES[country])
-        for domain in items:
-            lines.append(f"Domain: {domain}")
+        for item in items:
+            suffix = ""
+            if item.get("reason") == "WAF_BLOCK":
+                suffix = f" [{item['http_code']}|WAF]"
+            lines.append(f"Domain: {item['domain']}{suffix}")
         lines.append("")
     if not has_ok:
         lines.extend(["(none)", ""])
@@ -132,33 +138,49 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
     lines.extend(
         [
             "————————————",
-            f"🔴 Errors ({err_count})",
+            f"🔴 Banned ({ban_count})",
             "————————————",
             "",
         ]
     )
 
-    has_err = False
+    has_ban = False
     for country in COUNTRIES:
-        items = errors_by_country[country]
+        items = ban_by_country[country]
         if not items:
             continue
-        has_err = True
+        has_ban = True
         lines.append(COUNTRY_TITLES[country])
         for item in items:
             lines.append(
-                f"Domain: {item['domain']} [{item['http_code']} | {item['reason']}]"
+                f"Domain: {item['domain']} [{item['reason']}]"
             )
         lines.append("")
-    if not has_err:
+    if not has_ban:
         lines.extend(["(none)", ""])
+
+    if err_count > 0:
+        lines.extend(
+            [
+                "————————————",
+                f"🟡 Untested / Proxy Error ({err_count})",
+                "————————————",
+                "",
+            ]
+        )
+        for country in COUNTRIES:
+            items = err_by_country[country]
+            if not items:
+                continue
+            lines.append(COUNTRY_TITLES[country])
+            for item in items:
+                lines.append(f"Domain: {item['domain']} [PROXY_DEAD]")
+            lines.append("")
 
     lines.extend(
         [
             "————————————",
-            f"Total: {total_count}",
-            f"🟢 Reachable: {ok_count}",
-            f"🔴 Errors: {err_count}",
+            f"Total: {total_count} | 🟢 {ok_count} | 🔴 {ban_count} | 🟡 {err_count}",
         ]
     )
     text = "\n".join(lines)

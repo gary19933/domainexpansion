@@ -187,6 +187,12 @@ def is_success_code(http_code: str) -> bool:
     return 200 <= code <= 399
 
 
+def is_reachable_http_code(http_code: str) -> bool:
+    if not re.fullmatch(r"\d{3}", http_code):
+        return False
+    return http_code not in {"000", "407"}
+
+
 def matches_target_domain(target_domain: str, effective_url: str) -> bool:
     if not effective_url:
         return False
@@ -199,7 +205,9 @@ def matches_target_domain(target_domain: str, effective_url: str) -> bool:
 
 def infer_reason(http_code: str, status: str) -> str:
     if status == "OK":
-        return "OK"
+        return "REACHABLE"
+    if status == "ERROR":
+        return "PROXY_DEAD"
     if is_block_code(http_code):
         return "PROXY_BLOCK"
     if http_code == "000":
@@ -257,7 +265,9 @@ def check_country(
                 best_code = code
             if is_block_code(code):
                 has_block = True
-            if is_success_code(code) and matches_target_domain(target_domain, effective_url):
+            if is_reachable_http_code(code) and matches_target_domain(
+                target_domain, effective_url
+            ):
                 return True, has_block, code
             if retry_idx < retries - 1:
                 time.sleep(0.1)
@@ -274,18 +284,18 @@ def check_country(
 
     def check_one_domain(domain: str) -> dict[str, str]:
         resolved = dns_ok(domain)
-        target_success = 0
+        target_reachable = 0
         target_block = 0
-        control_success = 0
+        control_reachable = 0
         target_codes: list[str] = []
 
         for attempt_idx in range(attempts):
             ok_t, block_t, code_t = probe_once(domain, f"https://{domain}")
             ok_c, _, _ = probe_once(control_domain, f"https://{control_domain}")
 
-            target_success += 1 if ok_t else 0
+            target_reachable += 1 if ok_t else 0
             target_block += 1 if block_t else 0
-            control_success += 1 if ok_c else 0
+            control_reachable += 1 if ok_c else 0
             target_codes.append(code_t)
 
             if attempt_idx < attempts - 1:
@@ -293,16 +303,15 @@ def check_country(
 
         final_http_code = next((code for code in target_codes if code != "000"), "000")
 
-        if target_success >= required_success:
+        if control_reachable < required_success:
+            status = "ERROR"
+            reason = "PROXY_DEAD"
+        elif target_reachable >= required_success:
             status = "OK"
-            reason = "OK"
+            reason = "WAF_BLOCK" if target_block >= required_success else "REACHABLE"
         else:
             status = "BAN"
-            if control_success < required_success:
-                reason = "PROXY_ERROR"
-            elif target_block >= required_success:
-                reason = "PROXY_BLOCK"
-            elif not resolved:
+            if not resolved:
                 reason = "DNS_FAIL"
             else:
                 reason = "LIKELY_BANNED"
