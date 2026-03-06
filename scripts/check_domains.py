@@ -291,12 +291,26 @@ def check_country(
 
         for attempt_idx in range(attempts):
             ok_t, block_t, code_t = probe_once(domain, f"https://{domain}")
-            ok_c, _, _ = probe_once(control_domain, f"https://{control_domain}")
-
             target_reachable += 1 if ok_t else 0
             target_block += 1 if block_t else 0
-            control_reachable += 1 if ok_c else 0
             target_codes.append(code_t)
+
+            # Lazy control probe: only test control-domain when target fails.
+            # If target succeeds, treat this attempt as proxy-healthy.
+            if ok_t:
+                control_reachable += 1
+            else:
+                ok_c, _, _ = probe_once(control_domain, f"https://{control_domain}")
+                control_reachable += 1 if ok_c else 0
+
+            # Early exit: already reached majority success.
+            if target_reachable >= required_success:
+                break
+
+            # Early exit: cannot reach majority success even if all remaining attempts succeed.
+            remaining_attempts = attempts - (attempt_idx + 1)
+            if (target_reachable + remaining_attempts) < required_success:
+                break
 
             if attempt_idx < attempts - 1:
                 time.sleep(0.2)
