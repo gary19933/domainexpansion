@@ -25,10 +25,6 @@ set +a
 required_vars=(
   TG_BOT_TOKEN
   TG_CHAT_ID
-  RES_PROXY_MY
-  RES_PROXY_SG
-  RES_PROXY_TH
-  RES_PROXY_NP
 )
 
 for var_name in "${required_vars[@]}"; do
@@ -47,9 +43,6 @@ COUNTRY_SLEEP_SECONDS="${COUNTRY_SLEEP_SECONDS:-10}"
 
 for i in "${!COUNTRIES[@]}"; do
   country="${COUNTRIES[$i]}"
-  upper_country="$(echo "$country" | tr '[:lower:]' '[:upper:]')"
-  proxy_var="RES_PROXY_${upper_country}"
-  proxy_url="${!proxy_var:-}"
 
   echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] checking country=$country"
   python3 scripts/check_domains.py \
@@ -58,8 +51,7 @@ for i in "${!COUNTRIES[@]}"; do
     --log-file "records/ban_log.csv" \
     --rows-output "out/${country}_rows.csv" \
     --no-append-log \
-    --date "$RUN_DATE" \
-    --proxy-url "$proxy_url"
+    --date "$RUN_DATE"
 
   if (( i < ${#COUNTRIES[@]} - 1 )) && (( COUNTRY_SLEEP_SECONDS > 0 )); then
     echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] sleeping ${COUNTRY_SLEEP_SECONDS}s before next country"
