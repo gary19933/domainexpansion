@@ -87,6 +87,28 @@ def is_ready_redirect_target(effective_url: str) -> bool:
     return "/lander" in final_path or "/lander" in effective_low
 
 
+def has_ready_lander_hint(probe: ProbeResult) -> bool:
+    body_low = (probe.body_preview or "").lower()
+    if "/lander" not in body_low:
+        return False
+    # Browser-side redirects are not followed by curl -L. Treat common
+    # client-side patterns that point to /lander as READY as well.
+    lander_patterns = [
+        'location.href="/lander',
+        "location.href='/lander",
+        'location.replace("/lander',
+        "location.replace('/lander",
+        'window.location="/lander',
+        "window.location='/lander",
+        'window.location.href="/lander',
+        "window.location.href='/lander",
+        'content="0;url=/lander',
+        "content='0;url=/lander",
+        'url=/lander',
+    ]
+    return any(pattern in body_low for pattern in lander_patterns)
+
+
 def is_error_redirect_target(effective_url: str, original_domain: str) -> bool:
     if not effective_url:
         return False
@@ -334,7 +356,7 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
     # curl -L may finish on 200/301 after redirects. Domains that end on
     # /lander are intentionally split into a separate READY bucket, not
     # counted as directly reachable.
-    if is_ready_redirect_target(probe.effective_url):
+    if is_ready_redirect_target(probe.effective_url) or has_ready_lander_hint(probe):
         return AttemptOutcome("ready", "READY_LANDER", code)
 
     # curl -L may finish on 200/301 after redirects; unusable redirect targets
