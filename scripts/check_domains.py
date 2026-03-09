@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import csv
-import json
 import os
 import re
 import subprocess
@@ -153,60 +152,6 @@ def load_domains(list_file: Path) -> list[str]:
             seen.add(domain)
             domains.append(domain)
     return domains
-
-
-def run_nslookup(domain: str, proxy_url: str = "") -> tuple[int, str]:
-    # DNS is only a supporting signal. Keep DoH behavior when proxy is enabled.
-    if proxy_url:
-        cmd = [
-            "curl",
-            "--proxy",
-            proxy_url,
-            "--max-time",
-            "12",
-            "-sS",
-            "-H",
-            "accept: application/dns-json",
-            f"https://cloudflare-dns.com/dns-query?name={domain}&type=A",
-        ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-            output = (proc.stdout or "").strip()
-            if not output:
-                return 1, proc.stderr.strip() or "empty doh response"
-            try:
-                payload = json.loads(output)
-            except json.JSONDecodeError:
-                return 1, output
-            status = int(payload.get("Status", 1))
-            answers = payload.get("Answer", []) or []
-            if status == 0 and answers:
-                return 0, output
-            return 1, output
-        except FileNotFoundError:
-            return 127, "curl command not found"
-        except subprocess.TimeoutExpired:
-            return 124, "doh lookup timeout"
-
-    try:
-        proc = subprocess.run(
-            ["nslookup", domain],
-            capture_output=True,
-            text=True,
-            timeout=12,
-            check=False,
-        )
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    except FileNotFoundError:
-        return 127, "nslookup command not found"
-    except subprocess.TimeoutExpired:
-        return 124, "nslookup timeout"
 
 
 def _extract_title(html_preview: str) -> str:
@@ -454,7 +399,6 @@ def check_country(
     attempts: int = 5,
     control_domain: str = "google.com",
     retries: int = 2,
-    dns_retries: int = 2,
     control_domains: list[str] | None = None,
 ) -> list[dict[str, str]]:
     domains = load_domains(list_file)
@@ -464,7 +408,6 @@ def check_country(
     workers = max(1, workers)
     attempts = max(1, attempts)
     retries = max(1, retries)
-    dns_retries = max(1, dns_retries)
     controls = [d for d in (control_domains or []) if d]
     if not controls:
         controls = [control_domain]
@@ -472,15 +415,6 @@ def check_country(
     if not controls:
         controls = ["example.com", "cloudflare.com", "microsoft.com"]
     required_success = attempts // 2 + 1
-
-    def dns_supports(domain: str) -> bool:
-        for attempt_i in range(dns_retries):
-            rc, _ = run_nslookup(domain, proxy_url)
-            if rc == 0:
-                return True
-            if attempt_i < dns_retries - 1:
-                time.sleep(0.15)
-        return False
 
     def probe_with_retries(target_domain: str, url: str) -> AttemptOutcome:
         last = AttemptOutcome("network", "UNKNOWN", "000")
@@ -495,7 +429,6 @@ def check_country(
         return last
 
     def check_one_domain(domain: str) -> dict[str, str]:
-        dns_ok = dns_supports(domain)
         outcomes: list[AttemptOutcome] = []
         control_ok_count = 0
         control_fail_count = 0
@@ -576,7 +509,10 @@ def check_country(
 
         # Conservative aggregation:
         # - BAN only with strong evidence.
-        # - ERROR reserved for control-path/proxy path failures.
+        # - ERROR reserved for no-response, bad redirects, and control-path/proxy failures.
+        # - Final classification is based on curl results only; DNS lookup is not
+        #   used as a deciding signal because name resolution alone does not tell
+        #   us whether the site is actually reachable through the target path.
         # - SUSPECT for ambiguous outcomes.
         if error_redirect_count >= required_success:
             status = "ERROR"
@@ -615,9 +551,6 @@ def check_country(
         elif challenge_count >= required_success:
             status = "SUSPECT"
             reason = "CHALLENGE_PAGE"
-        elif not dns_ok and success_count == 0:
-            status = "SUSPECT"
-            reason = "DNS_FAIL"
         elif network_count >= required_success and control_ok_count >= required_success:
             status = "SUSPECT"
             reason = "TARGET_UNREACHABLE"
@@ -695,12 +628,6 @@ def main() -> None:
         default=int(os.getenv("CHECK_RETRIES", "2")),
         help="Retries per individual URL probe (default: 2).",
     )
-    parser.add_argument(
-        "--dns-retries",
-        type=int,
-        default=int(os.getenv("DNS_RETRIES", "2")),
-        help="Retries for DNS lookup support signal (default: 2).",
-    )
     args = parser.parse_args()
 
     list_file = args.list_file or Path("lists") / f"{args.country}.txt"
@@ -722,7 +649,6 @@ def main() -> None:
         args.attempts,
         args.control_domain,
         args.retries,
-        args.dns_retries,
         multi_controls,
     )
     write_rows_csv(rows_output, rows)

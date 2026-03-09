@@ -54,8 +54,7 @@ runs-on:
 ```
 
 - 每个国家 job 会执行：
-  - `nslookup <domain>`
-  - `curl -L` 获取 `http_code`
+  - `curl -L` 获取最终 `http_code` 与跳转落点
 - BAN 判定条件：
   - `000`
   - `403`
