@@ -48,6 +48,8 @@ CHALLENGE_WEAK_KEYWORDS = [
 class ProbeResult:
     http_code: str
     effective_url: str
+    final_hostname: str
+    response_received: bool
     stderr: str
     headers: str
     body_preview: str
@@ -60,6 +62,51 @@ class AttemptOutcome:
     kind: str
     reason: str
     code: str
+
+
+def normalize_hostname(host: str) -> str:
+    return (host or "").strip().strip(".").lower()
+
+
+def is_same_domain_or_www(original_host: str, final_host: str) -> bool:
+    # Treat domain and www.<domain> as equivalent forms.
+    orig = normalize_hostname(original_host)
+    final = normalize_hostname(final_host)
+    if not orig or not final:
+        return False
+    orig_base = orig[4:] if orig.startswith("www.") else orig
+    final_base = final[4:] if final.startswith("www.") else final
+    return orig_base == final_base
+
+
+def is_error_redirect_target(effective_url: str, original_domain: str) -> bool:
+    if not effective_url:
+        return False
+    parsed = urlparse(effective_url)
+    effective_low = effective_url.lower()
+    final_path = (parsed.path or "").lower()
+
+    # Same host can still be unusable when final redirected path is known-bad.
+    # Example: /lander or /cgi-sys/defaultwebpage.cgi.
+    if "/lander" in final_path or "/lander" in effective_low:
+        return True
+    if "/cgi-sys/defaultwebpage.cgi" in final_path or "/cgi-sys/defaultwebpage.cgi" in effective_low:
+        return True
+
+    # Different final hostname is ERROR. Equivalent host and www.<host> are same.
+    final_host = normalize_hostname(parsed.hostname or "")
+    return not is_same_domain_or_www(original_domain, final_host)
+
+
+def has_no_http_response(probe: ProbeResult) -> bool:
+    # HTTP 000 must only represent connect-level/network failures where no
+    # response headers were received from the server.
+    if probe.response_received:
+        return False
+    if probe.http_code == "000":
+        return True
+    headers = probe.headers or ""
+    return "HTTP/" not in headers
 
 
 def is_valid_domain(host: str) -> bool:
@@ -199,6 +246,8 @@ def run_curl_probe(url: str, proxy_url: str = "") -> ProbeResult:
     cmd.extend(
         [
             "-L",
+            # curl follows redirects with -L, so unusable domains can still end
+            # on a 200/301/302 at a bad final destination.
             "--max-time",
             "20",
             "--connect-timeout",
@@ -237,6 +286,8 @@ def run_curl_probe(url: str, proxy_url: str = "") -> ProbeResult:
         stderr_text = (proc.stderr or "").strip()
         http_code = "000"
         effective_url = ""
+        final_hostname = ""
+        response_received = False
         if "\t" in writeout:
             left, right = writeout.split("\t", 1)
             if re.fullmatch(r"\d{3}", left.strip()):
@@ -251,11 +302,17 @@ def run_curl_probe(url: str, proxy_url: str = "") -> ProbeResult:
         body_preview = Path(body_path).read_text(encoding="utf-8", errors="replace")[
             :BODY_PREVIEW_LIMIT
         ]
+        final_hostname = normalize_hostname(urlparse(effective_url).hostname or "")
+        response_received = bool(re.fullmatch(r"\d{3}", http_code) and http_code != "000")
+        if not response_received and "HTTP/" in headers_raw:
+            response_received = True
         title = _extract_title(body_preview)
         error_hint = _infer_error_hint(stderr_text, http_code)
         return ProbeResult(
             http_code=http_code,
             effective_url=effective_url,
+            final_hostname=final_hostname,
+            response_received=response_received,
             stderr=stderr_text,
             headers=headers_raw,
             body_preview=body_preview,
@@ -263,11 +320,13 @@ def run_curl_probe(url: str, proxy_url: str = "") -> ProbeResult:
             error_hint=error_hint,
         )
     except FileNotFoundError:
-        return ProbeResult("000", "", "curl command not found", "", "", "", "CURL_NOT_FOUND")
+        return ProbeResult(
+            "000", "", "", False, "curl command not found", "", "", "", "CURL_NOT_FOUND"
+        )
     except subprocess.TimeoutExpired:
-        return ProbeResult("000", "", "curl timeout", "", "", "", "TIMEOUT")
+        return ProbeResult("000", "", "", False, "curl timeout", "", "", "", "TIMEOUT")
     except Exception as exc:
-        return ProbeResult("000", "", str(exc), "", "", "", "RUNTIME_ERROR")
+        return ProbeResult("000", "", "", False, str(exc), "", "", "", "RUNTIME_ERROR")
     finally:
         for p in (headers_path, body_path):
             try:
@@ -317,12 +376,17 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
     headers_text = (probe.headers or "").lower()
     code = probe.http_code
 
-    if code == "000":
-        return AttemptOutcome(
-            "network",
-            probe.error_hint if probe.error_hint != "UNKNOWN" else "UNKNOWN",
-            code,
-        )
+    if has_no_http_response(probe):
+        return AttemptOutcome("error", "NO_HTTP_RESPONSE", "000")
+
+    # curl -L may finish on 200/301 after redirects; unusable redirect targets
+    # must still be marked ERROR while preserving the real HTTP code.
+    # Rules:
+    # - different final hostname => ERROR
+    # - same hostname + /lander or /cgi-sys/defaultwebpage.cgi => ERROR
+    # - same hostname + normal path redirect (e.g. /th-th) => not ERROR here
+    if is_error_redirect_target(probe.effective_url, target_domain):
+        return AttemptOutcome("error", "ERROR_REDIRECT", code)
 
     if _contains_any(body_title, BLOCK_KEYWORDS):
         return AttemptOutcome("block", "BODY_BLOCK", code)
@@ -344,8 +408,6 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
     page_ok = _looks_like_real_page(probe)
 
     if code_ok and (host_match or page_ok):
-        if not host_match:
-            return AttemptOutcome("success", "REDIRECT_OTHER_DOMAIN", code)
         return AttemptOutcome("success", "REACHABLE", code)
 
     if code_ok and not host_match:
@@ -444,6 +506,8 @@ def check_country(
         network_count = 0
         redirect_count = 0
         suspect_count = 0
+        no_http_response_count = 0
+        error_redirect_count = 0
 
         for attempt_i in range(attempts):
             out = probe_with_retries(domain, f"https://{domain}")
@@ -462,10 +526,18 @@ def check_country(
                 challenge_count += 1
             elif out.kind == "network":
                 network_count += 1
+            elif out.kind == "error":
+                if out.reason == "NO_HTTP_RESPONSE":
+                    no_http_response_count += 1
+                    network_count += 1
+                elif out.reason == "ERROR_REDIRECT":
+                    error_redirect_count += 1
+                else:
+                    suspect_count += 1
             else:
                 suspect_count += 1
 
-            if out.kind in {"network", "suspect"}:
+            if out.kind in {"network", "suspect", "error"}:
                 c_domain = controls[attempt_i % len(controls)]
                 c_out = probe_with_retries(c_domain, f"https://{c_domain}")
 
@@ -506,7 +578,13 @@ def check_country(
         # - BAN only with strong evidence.
         # - ERROR reserved for control-path/proxy path failures.
         # - SUSPECT for ambiguous outcomes.
-        if success_count >= required_success:
+        if error_redirect_count >= required_success:
+            status = "ERROR"
+            reason = "ERROR_REDIRECT"
+        elif no_http_response_count >= required_success:
+            status = "ERROR"
+            reason = "NO_HTTP_RESPONSE"
+        elif success_count >= required_success:
             status = "OK"
             if redirect_count >= required_success:
                 reason = "REDIRECT_OTHER_DOMAIN"
