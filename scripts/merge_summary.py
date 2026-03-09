@@ -163,7 +163,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
         lines.extend(
             [
                 "————————————",
-                f"🟡 Untested / Proxy Error ({err_count})",
+                f"🟡 Errors / Suspect ({err_count})",
                 "————————————",
                 "",
             ]
@@ -174,7 +174,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
                 continue
             lines.append(COUNTRY_TITLES[country])
             for item in items:
-                lines.append(f"Domain: {item['domain']} [PROXY_DEAD]")
+                lines.append(f"Domain: {item['domain']} [{item['reason']}]")
             lines.append("")
 
     lines.extend(
