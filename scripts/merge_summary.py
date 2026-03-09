@@ -15,13 +15,14 @@ COUNTRY_TITLES = {
     "np": "🇳🇵 Nepal",
 }
 
-
 def infer_reason(http_code: str, status: str) -> str:
     code = (http_code or "").strip()
     if status == "OK":
         return "REACHABLE"
+    if status == "READY":
+        return "READY_LANDER"
     if status == "ERROR":
-        return "PROXY_DEAD"
+        return "ERROR"
     if code == "000":
         return "NETWORK_ERROR"
     if code in {"403", "407", "451"}:
@@ -82,8 +83,8 @@ def append_ban_log(log_file: Path, rows: list[dict[str, str]]) -> None:
 
 def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> str:
     ok_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
-    ban_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
-    err_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
+    ready_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
+    error_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
 
     unique_rows: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
@@ -94,27 +95,27 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
         status = row["status"]
         if status == "OK":
             ok_by_country[country].append(row)
-        elif status == "BAN":
-            ban_by_country[country].append(row)
+        elif status == "READY" or row.get("reason") == "READY_LANDER":
+            ready_by_country[country].append(row)
         else:
-            err_by_country[country].append(row)
+            error_by_country[country].append(row)
 
     for country in COUNTRIES:
         ok_by_country[country].sort(key=lambda x: x["domain"])
-        ban_by_country[country].sort(key=lambda x: x["domain"])
-        err_by_country[country].sort(key=lambda x: x["domain"])
+        ready_by_country[country].sort(key=lambda x: x["domain"])
+        error_by_country[country].sort(key=lambda x: x["domain"])
 
     ok_count = sum(len(ok_by_country[c]) for c in COUNTRIES)
-    ban_count = sum(len(ban_by_country[c]) for c in COUNTRIES)
-    err_count = sum(len(err_by_country[c]) for c in COUNTRIES)
-    total_count = ok_count + ban_count + err_count
+    ready_count = sum(len(ready_by_country[c]) for c in COUNTRIES)
+    error_count = sum(len(error_by_country[c]) for c in COUNTRIES)
+    total_count = ok_count + ready_count + error_count
 
     lines = [
         "📊 Daily Website Check Report",
         f"Date: {day}",
         "",
         "————————————",
-        f"🟢 Reachable ({ok_count})",
+        "🟢 Reachable",
         "————————————",
         "",
     ]
@@ -125,7 +126,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
         if not items:
             continue
         has_ok = True
-        lines.append(COUNTRY_TITLES[country])
+        lines.append(f"{COUNTRY_TITLES[country]} ({len(items)})")
         for item in items:
             suffix = ""
             if item.get("reason") == "WAF_BLOCK":
@@ -138,49 +139,53 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
     lines.extend(
         [
             "————————————",
-            f"🔴 Banned ({ban_count})",
+            f"🟠 Ready ({ready_count})",
             "————————————",
             "",
         ]
     )
 
-    has_ban = False
+    has_ready = False
     for country in COUNTRIES:
-        items = ban_by_country[country]
+        items = ready_by_country[country]
         if not items:
             continue
-        has_ban = True
-        lines.append(COUNTRY_TITLES[country])
+        has_ready = True
+        lines.append(f"{COUNTRY_TITLES[country]} ({len(items)})")
+        for item in items:
+            lines.append(f"Domain: {item['domain']}")
+        lines.append("")
+    if not has_ready:
+        lines.extend(["(none)", ""])
+
+    lines.extend(
+        [
+            "————————————",
+            f"🔴 Error ({error_count})",
+            "————————————",
+            "",
+        ]
+    )
+
+    has_error = False
+    for country in COUNTRIES:
+        items = error_by_country[country]
+        if not items:
+            continue
+        has_error = True
+        lines.append(f"{COUNTRY_TITLES[country]} ({len(items)})")
         for item in items:
             lines.append(
                 f"Domain: {item['domain']} [{item['reason']}]"
             )
         lines.append("")
-    if not has_ban:
+    if not has_error:
         lines.extend(["(none)", ""])
-
-    if err_count > 0:
-        lines.extend(
-            [
-                "————————————",
-                f"🟡 Errors / Suspect ({err_count})",
-                "————————————",
-                "",
-            ]
-        )
-        for country in COUNTRIES:
-            items = err_by_country[country]
-            if not items:
-                continue
-            lines.append(COUNTRY_TITLES[country])
-            for item in items:
-                lines.append(f"Domain: {item['domain']} [{item['reason']}]")
-            lines.append("")
 
     lines.extend(
         [
             "————————————",
-            f"Total: {total_count} | 🟢 {ok_count} | 🔴 {ban_count} | 🟡 {err_count}",
+            f"Total: {total_count} | 🟢 {ok_count} | 🟠 {ready_count} | 🔴 {error_count}",
         ]
     )
     text = "\n".join(lines)

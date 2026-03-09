@@ -78,6 +78,15 @@ def is_same_domain_or_www(original_host: str, final_host: str) -> bool:
     return orig_base == final_base
 
 
+def is_ready_redirect_target(effective_url: str) -> bool:
+    if not effective_url:
+        return False
+    parsed = urlparse(effective_url)
+    effective_low = effective_url.lower()
+    final_path = (parsed.path or "").lower()
+    return "/lander" in final_path or "/lander" in effective_low
+
+
 def is_error_redirect_target(effective_url: str, original_domain: str) -> bool:
     if not effective_url:
         return False
@@ -86,9 +95,7 @@ def is_error_redirect_target(effective_url: str, original_domain: str) -> bool:
     final_path = (parsed.path or "").lower()
 
     # Same host can still be unusable when final redirected path is known-bad.
-    # Example: /lander or /cgi-sys/defaultwebpage.cgi.
-    if "/lander" in final_path or "/lander" in effective_low:
-        return True
+    # Example: /cgi-sys/defaultwebpage.cgi.
     if "/cgi-sys/defaultwebpage.cgi" in final_path or "/cgi-sys/defaultwebpage.cgi" in effective_low:
         return True
 
@@ -324,11 +331,17 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
     if has_no_http_response(probe):
         return AttemptOutcome("error", "NO_HTTP_RESPONSE", "000")
 
+    # curl -L may finish on 200/301 after redirects. Domains that end on
+    # /lander are intentionally split into a separate READY bucket, not
+    # counted as directly reachable.
+    if is_ready_redirect_target(probe.effective_url):
+        return AttemptOutcome("ready", "READY_LANDER", code)
+
     # curl -L may finish on 200/301 after redirects; unusable redirect targets
     # must still be marked ERROR while preserving the real HTTP code.
     # Rules:
     # - different final hostname => ERROR
-    # - same hostname + /lander or /cgi-sys/defaultwebpage.cgi => ERROR
+    # - same hostname + /cgi-sys/defaultwebpage.cgi => ERROR
     # - same hostname + normal path redirect (e.g. /th-th) => not ERROR here
     if is_error_redirect_target(probe.effective_url, target_domain):
         return AttemptOutcome("error", "ERROR_REDIRECT", code)
@@ -422,7 +435,7 @@ def check_country(
             probe = run_curl_probe(url, proxy_url)
             outcome = classify_probe(target_domain, probe)
             last = outcome
-            if outcome.kind in {"success", "block", "challenge"}:
+            if outcome.kind in {"success", "block", "challenge", "ready"}:
                 return outcome
             if retry_i < retries - 1:
                 time.sleep(0.1)
@@ -436,6 +449,7 @@ def check_country(
         success_count = 0
         block_count = 0
         challenge_count = 0
+        ready_count = 0
         network_count = 0
         redirect_count = 0
         suspect_count = 0
@@ -450,6 +464,8 @@ def check_country(
                 success_count += 1
                 if out.reason == "REDIRECT_OTHER_DOMAIN":
                     redirect_count += 1
+            elif out.kind == "ready":
+                ready_count += 1
             elif out.kind == "redirect":
                 redirect_count += 1
                 suspect_count += 1
@@ -499,6 +515,8 @@ def check_country(
             remaining = attempts - (attempt_i + 1)
             if success_count >= required_success:
                 break
+            if ready_count >= required_success:
+                break
             if success_count + remaining < required_success and block_count >= required_success:
                 break
             if attempt_i < attempts - 1:
@@ -520,6 +538,9 @@ def check_country(
         elif no_http_response_count >= required_success:
             status = "ERROR"
             reason = "NO_HTTP_RESPONSE"
+        elif ready_count >= required_success:
+            status = "READY"
+            reason = "READY_LANDER"
         elif success_count >= required_success:
             status = "OK"
             if redirect_count >= required_success:
