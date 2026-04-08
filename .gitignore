@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated output
+out/
+tests/results/
+
+# Node modules (telegram bot)
+bot/node_modules/
+
+# Environment files
+.env
+*.env
+!deploy/cron/*.cron
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

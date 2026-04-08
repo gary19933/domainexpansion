@@ -25,10 +25,6 @@ set +a
 required_vars=(
   TG_BOT_TOKEN
   TG_CHAT_ID
-  RES_PROXY_MY
-  RES_PROXY_SG
-  RES_PROXY_TH
-  RES_PROXY_NP
 )
 
 for var_name in "${required_vars[@]}"; do
@@ -42,16 +38,64 @@ cd "$REPO_DIR"
 mkdir -p out records
 
 RUN_DATE="$(TZ=Asia/Kuala_Lumpur date '+%Y-%m-%d')"
-COUNTRIES=(my sg th np)
+
+# ---------------------------------------------------------------------------
+# VPS node-based countries (MY, SG, TH)
+# SSH host aliases are expected in ~/.ssh/config:
+#   Host my-node / sg-node / th-node
+# ---------------------------------------------------------------------------
+VPS_COUNTRIES=(my sg th)
+CHECKER_USER="${CHECKER_USER:-checker}"
+CHECKER_SCRIPT="/home/${CHECKER_USER}/checker_node.py"
+CHECKER_CONFIG="/home/${CHECKER_USER}/config.json"
+
+for country in "${VPS_COUNTRIES[@]}"; do
+  node_host="${country}-node"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] VPS check country=$country node=$node_host"
+
+  # Sync domain list to node
+  scp -q "lists/${country}.txt" "${CHECKER_USER}@${node_host}:/home/${CHECKER_USER}/lists/${country}.txt" || {
+    echo "WARNING: failed to sync list to $node_host, skipping"
+    continue
+  }
+
+  # Trigger check on node
+  ssh -o ConnectTimeout=10 "${CHECKER_USER}@${node_host}" \
+    "python3 ${CHECKER_SCRIPT} --config ${CHECKER_CONFIG} --list /home/${CHECKER_USER}/lists/${country}.txt" || {
+    echo "WARNING: checker_node.py failed on $node_host"
+  }
+
+  # Pull results
+  scp -q "${CHECKER_USER}@${node_host}:/home/${CHECKER_USER}/results/latest.json" \
+    "out/${country}_node_results.json" || {
+    echo "WARNING: failed to pull results from $node_host"
+  }
+done
+
+# Convert VPS node results to CSV
+python3 scripts/collect_results.py \
+  --date "$RUN_DATE" \
+  --out-dir "out" \
+  --countries "$(IFS=,; echo "${VPS_COUNTRIES[*]}")"
+
+# ---------------------------------------------------------------------------
+# Proxy-based fallback countries (NP)
+# ---------------------------------------------------------------------------
+PROXY_COUNTRIES=(np)
 COUNTRY_SLEEP_SECONDS="${COUNTRY_SLEEP_SECONDS:-10}"
 
-for i in "${!COUNTRIES[@]}"; do
-  country="${COUNTRIES[$i]}"
+for i in "${!PROXY_COUNTRIES[@]}"; do
+  country="${PROXY_COUNTRIES[$i]}"
   upper_country="$(echo "$country" | tr '[:lower:]' '[:upper:]')"
   proxy_var="RES_PROXY_${upper_country}"
   proxy_url="${!proxy_var:-}"
 
-  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] checking country=$country"
+  if [[ -z "$proxy_url" ]]; then
+    echo "WARNING: no proxy for $country (${proxy_var} not set), skipping"
+    continue
+  fi
+
+  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] proxy check country=$country"
   python3 scripts/check_domains.py \
     --country "$country" \
     --list-file "lists/${country}.txt" \
@@ -61,12 +105,14 @@ for i in "${!COUNTRIES[@]}"; do
     --date "$RUN_DATE" \
     --proxy-url "$proxy_url"
 
-  if (( i < ${#COUNTRIES[@]} - 1 )) && (( COUNTRY_SLEEP_SECONDS > 0 )); then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] sleeping ${COUNTRY_SLEEP_SECONDS}s before next country"
+  if (( i < ${#PROXY_COUNTRIES[@]} - 1 )) && (( COUNTRY_SLEEP_SECONDS > 0 )); then
     sleep "$COUNTRY_SLEEP_SECONDS"
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Merge all results and send Telegram summary
+# ---------------------------------------------------------------------------
 python3 scripts/merge_summary.py \
   --date "$RUN_DATE" \
   --out-dir "out" \

@@ -13,34 +13,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from classify import (
+    BLOCK_KEYWORDS,
+    BODY_PREVIEW_LIMIT,
+    CHALLENGE_STRONG_KEYWORDS,
+    CHALLENGE_WEAK_KEYWORDS,
+    contains_any,
+    extract_title,
+    is_block_code,
+    is_error_redirect_target,
+    is_ready_redirect_target,
+    is_same_domain_or_www,
+    is_valid_domain,
+    load_domains,
+    looks_like_real_page,
+    normalize_domain,
+    normalize_hostname,
+    has_ready_lander_hint as _has_ready_lander_hint_body,
+)
+
 ALLOWED_COUNTRIES = {"my", "sg", "th", "np"}
 LOG_FIELDS = ["date", "country", "domain", "http_code", "status"]
 ROW_FIELDS = ["date", "country", "domain", "http_code", "status", "reason"]
-
-LABEL_RE = re.compile(r"^[a-z0-9-]{1,63}$")
-IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
-TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
-
-BODY_PREVIEW_LIMIT = 5000
-BLOCK_KEYWORDS = [
-    "access denied",
-    "forbidden",
-    "blocked",
-    "restricted",
-    "not available in your region",
-    "this site can’t be reached",
-    "this site can't be reached",
-]
-CHALLENGE_STRONG_KEYWORDS = [
-    "attention required",
-    "captcha",
-    "verify you are human",
-    "checking your browser",
-    "ddos protection",
-]
-CHALLENGE_WEAK_KEYWORDS = [
-    "cloudflare",
-]
 
 
 @dataclass
@@ -63,67 +57,9 @@ class AttemptOutcome:
     code: str
 
 
-def normalize_hostname(host: str) -> str:
-    return (host or "").strip().strip(".").lower()
-
-
-def is_same_domain_or_www(original_host: str, final_host: str) -> bool:
-    # Treat domain and www.<domain> as equivalent forms.
-    orig = normalize_hostname(original_host)
-    final = normalize_hostname(final_host)
-    if not orig or not final:
-        return False
-    orig_base = orig[4:] if orig.startswith("www.") else orig
-    final_base = final[4:] if final.startswith("www.") else final
-    return orig_base == final_base
-
-
-def is_ready_redirect_target(effective_url: str) -> bool:
-    if not effective_url:
-        return False
-    parsed = urlparse(effective_url)
-    effective_low = effective_url.lower()
-    final_path = (parsed.path or "").lower()
-    return "/lander" in final_path or "/lander" in effective_low
-
-
 def has_ready_lander_hint(probe: ProbeResult) -> bool:
-    body_low = (probe.body_preview or "").lower()
-    if "/lander" not in body_low:
-        return False
-    # Browser-side redirects are not followed by curl -L. Treat common
-    # client-side patterns that point to /lander as READY as well.
-    lander_patterns = [
-        'location.href="/lander',
-        "location.href='/lander",
-        'location.replace("/lander',
-        "location.replace('/lander",
-        'window.location="/lander',
-        "window.location='/lander",
-        'window.location.href="/lander',
-        "window.location.href='/lander",
-        'content="0;url=/lander',
-        "content='0;url=/lander",
-        'url=/lander',
-    ]
-    return any(pattern in body_low for pattern in lander_patterns)
-
-
-def is_error_redirect_target(effective_url: str, original_domain: str) -> bool:
-    if not effective_url:
-        return False
-    parsed = urlparse(effective_url)
-    effective_low = effective_url.lower()
-    final_path = (parsed.path or "").lower()
-
-    # Same host can still be unusable when final redirected path is known-bad.
-    # Example: /cgi-sys/defaultwebpage.cgi.
-    if "/cgi-sys/defaultwebpage.cgi" in final_path or "/cgi-sys/defaultwebpage.cgi" in effective_low:
-        return True
-
-    # Different final hostname is ERROR. Equivalent host and www.<host> are same.
-    final_host = normalize_hostname(parsed.hostname or "")
-    return not is_same_domain_or_www(original_domain, final_host)
+    """Wrapper that extracts body_preview from ProbeResult for classify."""
+    return _has_ready_lander_hint_body(probe.body_preview)
 
 
 def has_no_http_response(probe: ProbeResult) -> bool:
@@ -137,57 +73,8 @@ def has_no_http_response(probe: ProbeResult) -> bool:
     return "HTTP/" not in headers
 
 
-def is_valid_domain(host: str) -> bool:
-    if not host or len(host) > 253:
-        return False
-    if IPV4_RE.fullmatch(host):
-        return False
-    labels = host.split(".")
-    if len(labels) < 2:
-        return False
-    for label in labels:
-        if not LABEL_RE.fullmatch(label):
-            return False
-        if label.startswith("-") or label.endswith("-"):
-            return False
-    if labels[-1].isdigit():
-        return False
-    return True
-
-
-def normalize_domain(raw: str) -> str:
-    text = raw.strip().lower()
-    if not text or text.startswith("#"):
-        return ""
-    token = text.split()[0]
-    probe = token if "://" in token else f"https://{token}"
-    parsed = urlparse(probe)
-    host = (parsed.hostname or "").strip(".")
-    if host.startswith("www."):
-        host = host[4:]
-    if not is_valid_domain(host):
-        return ""
-    return host
-
-
-def load_domains(list_file: Path) -> list[str]:
-    if not list_file.exists():
-        return []
-    seen = set()
-    domains: list[str] = []
-    for line in list_file.read_text(encoding="utf-8").splitlines():
-        domain = normalize_domain(line)
-        if domain and domain not in seen:
-            seen.add(domain)
-            domains.append(domain)
-    return domains
-
-
 def _extract_title(html_preview: str) -> str:
-    match = TITLE_RE.search(html_preview)
-    if not match:
-        return ""
-    return " ".join(match.group(1).split())[:300]
+    return extract_title(html_preview)
 
 
 def _infer_error_hint(stderr_text: str, http_code: str) -> str:
@@ -309,17 +196,8 @@ def run_curl_probe(url: str, proxy_url: str = "") -> ProbeResult:
                 pass
 
 
-def is_block_code(http_code: str) -> bool:
-    if http_code in {"403", "451"}:
-        return True
-    if re.fullmatch(r"52\d", http_code) or re.fullmatch(r"53\d", http_code):
-        return True
-    return False
-
-
 def _contains_any(text: str, keywords: list[str]) -> bool:
-    low = (text or "").lower()
-    return any(k in low for k in keywords)
+    return contains_any(text, keywords)
 
 
 def _domain_match_signal(target_domain: str, effective_url: str) -> bool:
@@ -333,16 +211,7 @@ def _domain_match_signal(target_domain: str, effective_url: str) -> bool:
 
 
 def _looks_like_real_page(probe: ProbeResult) -> bool:
-    body_title = f"{probe.title}\n{probe.body_preview}".lower()
-    if _contains_any(body_title, BLOCK_KEYWORDS) or _contains_any(
-        body_title, CHALLENGE_STRONG_KEYWORDS
-    ):
-        return False
-    if len(probe.body_preview.strip()) >= 120:
-        return True
-    if probe.title.strip():
-        return True
-    return False
+    return looks_like_real_page(probe.title, probe.body_preview)
 
 
 def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:

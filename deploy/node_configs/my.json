@@ -1,0 +1,10 @@
+{
+  "country": "my",
+  "node_id": "my-node-01",
+  "dns_resolvers": {
+    "local": ["203.106.0.20", "123.108.0.1"],
+    "global": ["8.8.8.8", "1.1.1.1"]
+  },
+  "control_domains": ["google.com", "cloudflare.com"],
+  "results_dir": "/home/checker/results"
+}
