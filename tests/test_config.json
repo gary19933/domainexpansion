@@ -1,0 +1,10 @@
+{
+  "country": "test",
+  "node_id": "local-test",
+  "dns_resolvers": {
+    "local": [],
+    "global": ["8.8.8.8", "1.1.1.1"]
+  },
+  "control_domains": ["google.com", "cloudflare.com"],
+  "results_dir": "tests/results"
+}
