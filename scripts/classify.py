@@ -22,6 +22,31 @@ BLOCK_KEYWORDS = [
     "not available in your region",
     "this site can't be reached",
     "this site can\u2019t be reached",
+    # Thai ISP / MDES block page indicators
+    "\u0e1b\u0e34\u0e14\u0e01\u0e31\u0e49\u0e19",              # ปิดกั้น (blocked/censored)
+    "\u0e40\u0e27\u0e47\u0e1a\u0e44\u0e0b\u0e15\u0e4c\u0e16\u0e39\u0e01\u0e1a\u0e25\u0e47\u0e2d\u0e01",  # เว็บไซต์ถูกบล็อก (website blocked)
+    "\u0e1e.\u0e23.\u0e1a.\u0e04\u0e2d\u0e21\u0e1e\u0e34\u0e27\u0e40\u0e15\u0e2d\u0e23\u0e4c",      # พ.ร.บ.คอมพิวเตอร์ (Computer Act)
+    "court order",
+    "blocked by order",
+    # Malay MCMC block page indicators
+    "laman web ini disekat",
+    "disekat oleh",
+    # Singapore IMDA block page indicators
+    "ordered by the",
+    "infocommunications media development authority",
+]
+
+# Known government / ISP block page hostnames.  When curl follows a redirect
+# and lands on one of these hosts the domain is blocked, not simply broken.
+BLOCK_PAGE_HOSTS = [
+    "block.mdes.go.th",
+    "block-mdes.go.th",
+    "warning.trueonline.com",
+    "blocked.3bb.co.th",
+    "blockpage.dtac.co.th",
+    "bfrblock.ais.co.th",
+    "block.mcmc.gov.my",
+    "sekatan.mcmc.gov.my",
 ]
 
 CHALLENGE_STRONG_KEYWORDS = [
@@ -134,6 +159,13 @@ def looks_like_real_page(title: str, body_preview: str) -> bool:
     if title.strip():
         return True
     return False
+
+
+def is_block_page_host(hostname: str) -> bool:
+    host = normalize_hostname(hostname)
+    if not host:
+        return False
+    return any(host == bp or host.endswith("." + bp) for bp in BLOCK_PAGE_HOSTS)
 
 
 def is_block_code(http_code: str) -> bool:

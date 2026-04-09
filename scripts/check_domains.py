@@ -15,12 +15,14 @@ from urllib.parse import urlparse
 
 from classify import (
     BLOCK_KEYWORDS,
+    BLOCK_PAGE_HOSTS,
     BODY_PREVIEW_LIMIT,
     CHALLENGE_STRONG_KEYWORDS,
     CHALLENGE_WEAK_KEYWORDS,
     contains_any,
     extract_title,
     is_block_code,
+    is_block_page_host,
     is_error_redirect_target,
     is_ready_redirect_target,
     is_same_domain_or_www,
@@ -228,16 +230,23 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
     if is_ready_redirect_target(probe.effective_url) or has_ready_lander_hint(probe):
         return AttemptOutcome("ready", "READY_LANDER", code)
 
+    # Body / host block signals must be checked early so that redirects to
+    # government block pages are classified as BAN, not generic ERROR.
+    body_has_block = _contains_any(body_title, BLOCK_KEYWORDS)
+
     # curl -L may finish on 200/301 after redirects; unusable redirect targets
     # must still be marked ERROR while preserving the real HTTP code.
     # Rules:
-    # - different final hostname => ERROR
+    # - different final hostname => ERROR  (unless it is a known block page)
     # - same hostname + /cgi-sys/defaultwebpage.cgi => ERROR
     # - same hostname + normal path redirect (e.g. /th-th) => not ERROR here
     if is_error_redirect_target(probe.effective_url, target_domain):
+        # Redirect landing on a block page is a ban signal, not a generic error.
+        if body_has_block or is_block_page_host(probe.final_hostname):
+            return AttemptOutcome("block", "BLOCK_REDIRECT", code)
         return AttemptOutcome("error", "ERROR_REDIRECT", code)
 
-    if _contains_any(body_title, BLOCK_KEYWORDS):
+    if body_has_block:
         return AttemptOutcome("block", "BODY_BLOCK", code)
 
     has_strong_challenge = _contains_any(body_title, CHALLENGE_STRONG_KEYWORDS)
@@ -418,30 +427,45 @@ def check_country(
 
         # Conservative aggregation:
         # - BAN only with strong evidence.
-        # - ERROR reserved for no-response, bad redirects, and control-path/proxy failures.
+        # - ERROR reserved for infrastructure / proxy failures where controls
+        #   also fail, proving the path itself is broken.
+        # - When a domain consistently gets no response or redirects to a
+        #   block page BUT control domains work, the target is intentionally
+        #   blocked — classify as BAN, not ERROR.
         # - Final classification is based on curl results only; DNS lookup is not
         #   used as a deciding signal because name resolution alone does not tell
         #   us whether the site is actually reachable through the target path.
         # - SUSPECT for ambiguous outcomes.
         if error_redirect_count >= required_success:
+            # If block signals were detected in the redirects, classify_probe
+            # already counted them as blocks rather than error_redirects.
+            # Reaching here means plain redirect with no block indicators.
             status = "ERROR"
             reason = "ERROR_REDIRECT"
         elif no_http_response_count >= required_success:
-            status = "ERROR"
-            reason = "NO_HTTP_RESPONSE"
+            # Connection-level block (SNI / IP block) vs infrastructure failure:
+            # if control domains work, the target is intentionally blocked.
+            if control_ok_count >= required_success:
+                status = "BAN"
+                reason = "TARGETED_BLOCK"
+            else:
+                status = "ERROR"
+                reason = "NO_HTTP_RESPONSE"
         elif ready_count >= required_success:
             status = "READY"
             reason = "READY_LANDER"
         elif success_count >= required_success:
             status = "OK"
-            if redirect_count >= required_success:
-                reason = "REDIRECT_OTHER_DOMAIN"
-            else:
-                reason = "REACHABLE"
+            reason = "REACHABLE"
         elif block_count >= required_success and control_ok_count >= required_success:
             status = "BAN"
-            # Prefer body-level block if seen; otherwise HTTP-level block.
-            reason = "BODY_BLOCK" if any(o.reason == "BODY_BLOCK" for o in outcomes) else "HTTP_BLOCK"
+            # Prefer the most specific block reason seen across attempts.
+            if any(o.reason == "BLOCK_REDIRECT" for o in outcomes):
+                reason = "BLOCK_REDIRECT"
+            elif any(o.reason == "BODY_BLOCK" for o in outcomes):
+                reason = "BODY_BLOCK"
+            else:
+                reason = "HTTP_BLOCK"
         elif control_fail_count >= required_success and network_count >= required_success:
             status = "ERROR"
             reason = "PROXY_DEAD"
