@@ -537,14 +537,14 @@ def check_node_health(
 # Main check flow
 # ---------------------------------------------------------------------------
 
-def check_domain(
+def check_domain_once(
     domain: str,
     country: str,
     node_id: str,
     local_resolvers: list[str],
     global_resolvers: list[str],
 ) -> DomainResult:
-    """Run all three detection layers on a single domain."""
+    """Run all three detection layers on a single domain (one attempt)."""
     result = DomainResult(
         domain=domain,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -575,6 +575,47 @@ def check_domain(
     result.verdict, result.confidence = aggregate_verdict(result.dns, result.tls, result.http)
 
     return result
+
+
+def check_domain(
+    domain: str,
+    country: str,
+    node_id: str,
+    local_resolvers: list[str],
+    global_resolvers: list[str],
+    attempts: int = 3,
+) -> DomainResult:
+    """Run detection with retry logic — retries on SUSPECT/ERROR, not on BAN/OK.
+
+    Uses majority voting across attempts to avoid false results from
+    transient network hiccups. A domain needs 2/3 attempts to agree
+    before the verdict is finalised.
+    """
+    results: list[DomainResult] = []
+
+    for attempt_i in range(attempts):
+        r = check_domain_once(domain, country, node_id, local_resolvers, global_resolvers)
+        results.append(r)
+
+        # Early exit on confident results — no need for more attempts
+        if r.verdict == "BAN" and r.confidence == "high":
+            break
+        if r.verdict == "OK" and r.confidence == "high":
+            break
+
+        if attempt_i < attempts - 1:
+            time.sleep(1.0)
+
+    # Majority voting on verdict
+    from collections import Counter
+    verdict_counts = Counter(r.verdict for r in results)
+    majority_verdict = verdict_counts.most_common(1)[0][0]
+
+    # Pick the result that matches the majority verdict (prefer high confidence)
+    matching = [r for r in results if r.verdict == majority_verdict]
+    best = sorted(matching, key=lambda r: (r.confidence != "high", r.confidence != "medium"))[0]
+
+    return best
 
 
 def load_config(config_path: Path) -> dict:
