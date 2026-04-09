@@ -56,6 +56,9 @@ def map_result_to_row(result: dict, day: str) -> dict[str, str]:
             reason = "REDIRECT_BLOCK"
         else:
             reason = "LIKELY_BANNED"
+    elif verdict == "DEAD":
+        status = "DEAD"
+        reason = "DOMAIN_EXPIRED"
     elif verdict == "ERROR":
         status = "ERROR"
         # Try to pick a descriptive reason

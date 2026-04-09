@@ -247,14 +247,16 @@ def check_dns(domain: str, local_resolvers: list[str], global_resolvers: list[st
     result.local_ips = sorted(local_ips)
     result.global_ips = sorted(global_ips)
 
-    # No global resolution — domain may not exist
+    # No global resolution — domain may not exist or is expired
     if not global_ips:
         if not local_ips:
             result.signal = "DNS_NXDOMAIN"
             result.detail = "Domain does not resolve globally or locally"
         else:
-            result.signal = "DNS_OK"
-            result.detail = "Resolves locally but not globally (unusual)"
+            # Local/country DNS has stale cached records but Google/Cloudflare
+            # return nothing — the domain is dead/expired globally.
+            result.signal = "DNS_DEAD"
+            result.detail = "Local DNS has stale records but domain expired globally"
         return result
 
     # Global resolves but local does not
@@ -465,6 +467,10 @@ def check_http(domain: str, timeout: float = 20.0, max_redirects: int = 5) -> Ht
 def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple[str, str]:
     """Combine three layer signals into a final (verdict, confidence) tuple."""
     # DNS-level ban — but cross-check with TLS.
+    # Domain expired globally — local DNS has stale cache only
+    if dns.signal == "DNS_DEAD":
+        return "DEAD", "high"
+
     # If DNS says poisoned but TLS handshake succeeds with a valid cert,
     # the domain is actually reachable via a different CDN node, not banned.
     # A valid TLS cert proves the resolved IP belongs to the real domain owner.
