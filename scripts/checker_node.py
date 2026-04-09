@@ -250,8 +250,8 @@ def check_dns(domain: str, local_resolvers: list[str], global_resolvers: list[st
     # No global resolution — domain may not exist or is expired
     if not global_ips:
         if not local_ips:
-            result.signal = "DNS_NXDOMAIN"
-            result.detail = "Domain does not resolve globally or locally"
+            result.signal = "DNS_DEAD"
+            result.detail = "Domain does not resolve globally or locally — expired or never existed"
         else:
             # Local/country DNS has stale cached records but Google/Cloudflare
             # return nothing — the domain is dead/expired globally.
