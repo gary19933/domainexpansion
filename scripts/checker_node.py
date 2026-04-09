@@ -480,6 +480,11 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
     if tls.signal == "SNI_BLOCKED":
         return "BAN", "high"
     if tls.signal == "TLS_MITM":
+        # Cross-check with HTTP — if HTTP is reachable, the domain is not banned.
+        # TLS_MITM + HTTP_OK = domain has a misconfigured SSL cert, not ISP blocking.
+        # TLS_MITM + HTTP_ERROR/blocked = genuine ISP MITM interception → BAN.
+        if http.signal == "HTTP_OK":
+            return "SUSPECT", "medium"
         return "BAN", "high"
 
     # HTTP-level ban
