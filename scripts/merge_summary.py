@@ -2,18 +2,25 @@
 import argparse
 import csv
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from classify import load_domains_with_expected
 
 COUNTRIES = ["my", "sg", "th", "np"]
 LOG_FIELDS = ["date", "country", "domain", "http_code", "status"]
 ROW_FIELDS = ["date", "country", "domain", "http_code", "status", "reason"]
 
 COUNTRY_TITLES = {
-    "my": "🇲🇾 Malaysia",
-    "sg": "🇸🇬 Singapore",
-    "th": "🇹🇭 Thailand",
-    "np": "🇳🇵 Nepal",
+    "my": "\U0001f1f2\U0001f1fe Malaysia",
+    "sg": "\U0001f1f8\U0001f1ec Singapore",
+    "th": "\U0001f1f9\U0001f1ed Thailand",
+    "np": "\U0001f1f3\U0001f1f5 Nepal",
 }
+
+LISTS_DIR = Path(__file__).resolve().parent.parent / "lists"
+
 
 def infer_reason(http_code: str, status: str) -> str:
     code = (http_code or "").strip()
@@ -21,6 +28,8 @@ def infer_reason(http_code: str, status: str) -> str:
         return "REACHABLE"
     if status == "READY":
         return "READY_LANDER"
+    if status == "DOWN":
+        return "DOMAIN_DOWN"
     if status == "ERROR":
         return "ERROR"
     if code == "000":
@@ -30,6 +39,18 @@ def infer_reason(http_code: str, status: str) -> str:
     if re.fullmatch(r"52\d", code) or re.fullmatch(r"53\d", code):
         return "PROXY_BLOCK"
     return "LIKELY_BANNED"
+
+
+def load_expected_status_map() -> dict[str, str]:
+    """Load expected status for all countries from lists/*.txt files."""
+    expected: dict[str, str] = {}
+    for country in COUNTRIES:
+        list_file = LISTS_DIR / f"{country}.txt"
+        if not list_file.exists():
+            continue
+        for domain, status in load_domains_with_expected(list_file):
+            expected[domain] = status
+    return expected
 
 
 def load_country_rows(out_dir: Path, day: str) -> list[dict[str, str]]:
@@ -82,112 +103,155 @@ def append_ban_log(log_file: Path, rows: list[dict[str, str]]) -> None:
 
 
 def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> str:
-    ok_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
-    ready_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
-    error_by_country: dict[str, list[dict[str, str]]] = {c: [] for c in COUNTRIES}
+    expected_map = load_expected_status_map()
 
+    # Deduplicate by (country, domain)
     unique_rows: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
         unique_rows[(row["country"], row["domain"])] = row
 
+    # Categorize by priority
+    alerts: list[dict[str, str]] = []         # Active domains detected as banned/down
+    all_clear: list[dict[str, str]] = []      # Active domains confirmed reachable
+    confirmed_ban: list[dict[str, str]] = []  # Expected banned, confirmed banned
+    unconfirmed_ban: list[dict[str, str]] = []  # Expected banned, but shows OK (recovered?)
+    backup_ok: list[dict[str, str]] = []      # Backup domains reachable
+    backup_issue: list[dict[str, str]] = []   # Backup domains with issues
+    down_domains: list[dict[str, str]] = []   # Domains that are parked/expired
+    suspect: list[dict[str, str]] = []        # WAF, challenge, unknown
+
     for row in unique_rows.values():
-        country = row["country"]
+        domain = row["domain"]
         status = row["status"]
-        if status == "OK":
-            ok_by_country[country].append(row)
-        elif status == "READY" or row.get("reason") == "READY_LANDER":
-            ready_by_country[country].append(row)
+        reason = row.get("reason", "")
+        expected = expected_map.get(domain, "")
+
+        if status == "DOWN" or reason == "DOMAIN_DOWN":
+            down_domains.append(row)
+        elif expected == "active":
+            if status == "OK":
+                all_clear.append(row)
+            elif status in ("BAN", "ERROR") or reason in ("TARGETED_BLOCK", "WAF_BLOCK"):
+                alerts.append(row)
+            else:
+                suspect.append(row)
+        elif expected == "banned":
+            if status == "BAN":
+                confirmed_ban.append(row)
+            elif status == "OK":
+                unconfirmed_ban.append(row)
+            else:
+                confirmed_ban.append(row)
+        elif expected == "backup":
+            if status == "OK":
+                backup_ok.append(row)
+            else:
+                backup_issue.append(row)
         else:
-            error_by_country[country].append(row)
+            # No expected status annotation
+            if status == "OK":
+                all_clear.append(row)
+            elif status == "BAN":
+                confirmed_ban.append(row)
+            elif status in ("SUSPECT", "ERROR"):
+                suspect.append(row)
+            else:
+                suspect.append(row)
 
-    for country in COUNTRIES:
-        ok_by_country[country].sort(key=lambda x: x["domain"])
-        ready_by_country[country].sort(key=lambda x: x["domain"])
-        error_by_country[country].sort(key=lambda x: x["domain"])
+    for lst in [alerts, all_clear, confirmed_ban, unconfirmed_ban,
+                backup_ok, backup_issue, down_domains, suspect]:
+        lst.sort(key=lambda x: (x["country"], x["domain"]))
 
-    ok_count = sum(len(ok_by_country[c]) for c in COUNTRIES)
-    ready_count = sum(len(ready_by_country[c]) for c in COUNTRIES)
-    error_count = sum(len(error_by_country[c]) for c in COUNTRIES)
-    total_count = ok_count + ready_count + error_count
-
+    total = len(unique_rows)
     lines = [
-        "📊 Daily Website Check Report",
+        "\U0001f4ca Domain Check Report",
         f"Date: {day}",
-        "",
-        "————————————",
-        "🟢 Reachable",
-        "————————————",
+        f"Total: {total} domains checked",
         "",
     ]
 
-    has_ok = False
-    for country in COUNTRIES:
-        items = ok_by_country[country]
-        if not items:
-            continue
-        has_ok = True
-        lines.append(f"{COUNTRY_TITLES[country]} ({len(items)})")
-        for item in items:
-            suffix = ""
-            if item.get("reason") == "WAF_BLOCK":
-                suffix = f" [{item['http_code']}|WAF]"
-            lines.append(f"Domain: {item['domain']}{suffix}")
+    # ALERTS — most important, active domains that are banned
+    if alerts:
+        lines.append("\u2757\u2757 ALERT \u2014 Active Domains Blocked \u2757\u2757")
+        lines.append("\u2500" * 30)
+        for item in alerts:
+            lines.append(f"\u274c {item['domain']} [{item['reason']}]")
         lines.append("")
-    if not has_ok:
-        lines.extend(["(none)", ""])
 
-    lines.extend(
-        [
-            "————————————",
-            f"🟠 Ready ({ready_count})",
-            "————————————",
-            "",
-        ]
-    )
+    # ALL CLEAR — active domains confirmed OK
+    lines.append(f"\u2705 Active Domains OK ({len(all_clear)})")
+    lines.append("\u2500" * 30)
+    if all_clear:
+        by_country: dict[str, list[str]] = {}
+        for item in all_clear:
+            by_country.setdefault(item["country"], []).append(item["domain"])
+        for country in COUNTRIES:
+            domains = by_country.get(country, [])
+            if domains:
+                lines.append(f"{COUNTRY_TITLES.get(country, country)} ({len(domains)})")
+                for d in domains:
+                    lines.append(f"  {d}")
+    else:
+        lines.append("(none)")
+    lines.append("")
 
-    has_ready = False
-    for country in COUNTRIES:
-        items = ready_by_country[country]
-        if not items:
-            continue
-        has_ready = True
-        lines.append(f"{COUNTRY_TITLES[country]} ({len(items)})")
-        for item in items:
-            lines.append(f"Domain: {item['domain']}")
+    # BACKUP STATUS
+    if backup_ok or backup_issue:
+        lines.append(f"\U0001f4e6 Backup Domains ({len(backup_ok)} OK / {len(backup_issue)} issues)")
+        lines.append("\u2500" * 30)
+        for item in backup_ok:
+            lines.append(f"  \u2705 {item['domain']}")
+        for item in backup_issue:
+            lines.append(f"  \u26a0\ufe0f {item['domain']} [{item['reason']}]")
         lines.append("")
-    if not has_ready:
-        lines.extend(["(none)", ""])
 
-    lines.extend(
-        [
-            "————————————",
-            f"🔴 Error ({error_count})",
-            "————————————",
-            "",
-        ]
-    )
-
-    has_error = False
-    for country in COUNTRIES:
-        items = error_by_country[country]
-        if not items:
-            continue
-        has_error = True
-        lines.append(f"{COUNTRY_TITLES[country]} ({len(items)})")
-        for item in items:
-            lines.append(
-                f"Domain: {item['domain']} [{item['reason']}]"
-            )
+    # EXPECTED BANNED — recovered?
+    if unconfirmed_ban:
+        lines.append(f"\U0001f914 Expected Banned but Reachable ({len(unconfirmed_ban)})")
+        lines.append("\u2500" * 30)
+        for item in unconfirmed_ban:
+            lines.append(f"  \u2753 {item['domain']}")
         lines.append("")
-    if not has_error:
-        lines.extend(["(none)", ""])
 
-    lines.extend(
-        [
-            "————————————",
-            f"Total: {total_count} | 🟢 {ok_count} | 🟠 {ready_count} | 🔴 {error_count}",
-        ]
-    )
+    # CONFIRMED BANNED
+    if confirmed_ban:
+        lines.append(f"\U0001f6ab Confirmed Banned ({len(confirmed_ban)})")
+        lines.append("\u2500" * 30)
+        for item in confirmed_ban:
+            lines.append(f"  {item['domain']} [{item['reason']}]")
+        lines.append("")
+
+    # DOWN — parked/expired
+    if down_domains:
+        lines.append(f"\u23f8\ufe0f Domain Down/Parked ({len(down_domains)})")
+        lines.append("\u2500" * 30)
+        for item in down_domains:
+            lines.append(f"  {item['domain']} [{item['reason']}]")
+        lines.append("")
+
+    # SUSPECT — needs investigation
+    if suspect:
+        lines.append(f"\u26a0\ufe0f Needs Investigation ({len(suspect)})")
+        lines.append("\u2500" * 30)
+        for item in suspect:
+            lines.append(f"  {item['domain']} [{item['reason']}]")
+        lines.append("")
+
+    # Summary line
+    lines.append("\u2500" * 30)
+    summary_parts = [f"Total: {total}"]
+    if alerts:
+        summary_parts.append(f"\u274c Alert: {len(alerts)}")
+    summary_parts.append(f"\u2705 OK: {len(all_clear)}")
+    if backup_ok:
+        summary_parts.append(f"\U0001f4e6 Backup OK: {len(backup_ok)}")
+    summary_parts.append(f"\U0001f6ab Banned: {len(confirmed_ban)}")
+    if down_domains:
+        summary_parts.append(f"\u23f8\ufe0f Down: {len(down_domains)}")
+    if suspect:
+        summary_parts.append(f"\u26a0\ufe0f Suspect: {len(suspect)}")
+    lines.append(" | ".join(summary_parts))
+
     text = "\n".join(lines)
     return text if len(text) <= 3900 else text[:3860] + "\n...(truncated)"
 

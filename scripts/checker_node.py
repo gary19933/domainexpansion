@@ -31,11 +31,16 @@ from urllib.parse import urlparse
 
 from classify import (
     BLOCK_KEYWORDS,
+    BLOCK_PAGE_HOSTS,
     BODY_PREVIEW_LIMIT,
     CHALLENGE_STRONG_KEYWORDS,
     contains_any,
     extract_title,
     is_block_code,
+    is_block_page_host,
+    is_cloudflare_waf,
+    is_domain_down,
+    is_sibling_domain_redirect,
     load_domains,
 )
 
@@ -412,6 +417,21 @@ def check_http(domain: str, timeout: float = 20.0, max_redirects: int = 5) -> Ht
             # Analyze response
             title = extract_title(body)
             body_title = f"{title}\n{body}".lower()
+            headers_str = "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+
+            # Check for redirect to known block page hosts
+            final_host = (urlparse(current_url).hostname or "").lower()
+            if is_block_page_host(final_host):
+                result.signal = "HTTP_BLOCKED"
+                result.detail = f"Redirected to block page host: {final_host}"
+                return result
+
+            # Redirect to sibling domain (e.g. uea8th8.com → uea8th9.com)
+            # means the original domain is banned and replaced
+            if is_sibling_domain_redirect(domain, final_host):
+                result.signal = "HTTP_BLOCKED"
+                result.detail = f"Redirected to sibling domain: {final_host} (original banned)"
+                return result
 
             if contains_any(body_title, BLOCK_KEYWORDS):
                 result.signal = "HTTP_BLOCKED"
@@ -423,9 +443,21 @@ def check_http(domain: str, timeout: float = 20.0, max_redirects: int = 5) -> Ht
                 result.detail = "Challenge/CAPTCHA page detected"
                 return result
 
+            # Cloudflare WAF is NOT an ISP block — origin-side protection
+            if is_cloudflare_waf(headers_str, body, str(status)):
+                result.signal = "HTTP_WAF"
+                result.detail = "Cloudflare WAF/protection page (not ISP block)"
+                return result
+
             if is_block_code(str(status)):
                 result.signal = "HTTP_BLOCKED"
                 result.detail = f"HTTP {status} block status code"
+                return result
+
+            # Domain is parked/expired — not banned, just down
+            if is_domain_down(str(status), headers_str, body):
+                result.signal = "HTTP_DOWN"
+                result.detail = "Domain appears parked/expired/for-sale"
                 return result
 
             if 200 <= status <= 399:
@@ -491,6 +523,14 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
     # All OK
     if dns.signal == "DNS_OK" and tls.signal == "TLS_OK" and http.signal == "HTTP_OK":
         return "OK", "high"
+
+    # Domain is parked/expired — not banned by ISP, the domain itself is down
+    if http.signal == "HTTP_DOWN":
+        return "DOWN", "high"
+
+    # Cloudflare WAF — origin-side block, not ISP ban
+    if http.signal == "HTTP_WAF":
+        return "SUSPECT", "medium"
 
     # Infrastructure issues — all layers timing out
     timeout_signals = {"DNS_TIMEOUT", "SNI_TIMEOUT", "HTTP_TIMEOUT"}

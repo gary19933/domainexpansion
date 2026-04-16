@@ -28,9 +28,22 @@ BLOCK_KEYWORDS = [
     "\u0e1e.\u0e23.\u0e1a.\u0e04\u0e2d\u0e21\u0e1e\u0e34\u0e27\u0e40\u0e15\u0e2d\u0e23\u0e4c",      # พ.ร.บ.คอมพิวเตอร์ (Computer Act)
     "court order",
     "blocked by order",
+    # Thai MDES / NBTC additional patterns
+    "\u0e01\u0e23\u0e30\u0e17\u0e23\u0e27\u0e07\u0e14\u0e34\u0e08\u0e34\u0e17\u0e31\u0e25",          # กระทรวงดิจิทัล (Ministry of Digital)
+    "mdes.go.th",
+    "\u0e04\u0e33\u0e2a\u0e31\u0e48\u0e07\u0e28\u0e32\u0e25",                  # คำสั่งศาล (court order)
+    "\u0e44\u0e21\u0e48\u0e2a\u0e32\u0e21\u0e32\u0e23\u0e16\u0e40\u0e02\u0e49\u0e32\u0e16\u0e36\u0e07",          # ไม่สามารถเข้าถึง (cannot access)
+    "\u0e40\u0e27\u0e47\u0e1a\u0e44\u0e0b\u0e15\u0e4c\u0e19\u0e35\u0e49\u0e16\u0e39\u0e01\u0e23\u0e30\u0e07\u0e31\u0e1a",      # เว็บไซต์นี้ถูกระงับ (this website is suspended)
+    "\u0e1e\u0e23\u0e30\u0e23\u0e32\u0e0a\u0e1a\u0e31\u0e0d\u0e0d\u0e31\u0e15\u0e34",                # พระราชบัญญัติ (Royal Act)
+    # Thai ISP specific block pages
+    "true online",
+    "3bb",
+    "website blocked by",
+    "\u0e40\u0e27\u0e47\u0e1a\u0e44\u0e0b\u0e15\u0e4c\u0e17\u0e35\u0e48\u0e17\u0e48\u0e32\u0e19\u0e15\u0e49\u0e2d\u0e07\u0e01\u0e32\u0e23\u0e40\u0e02\u0e49\u0e32\u0e0a\u0e21",  # เว็บไซต์ที่ท่านต้องการเข้าชม (website you want to visit)
     # Malay MCMC block page indicators
     "laman web ini disekat",
     "disekat oleh",
+    "suruhanjaya komunikasi dan multimedia",
     # Singapore IMDA block page indicators
     "ordered by the",
     "infocommunications media development authority",
@@ -39,14 +52,31 @@ BLOCK_KEYWORDS = [
 # Known government / ISP block page hostnames.  When curl follows a redirect
 # and lands on one of these hosts the domain is blocked, not simply broken.
 BLOCK_PAGE_HOSTS = [
+    # Thai MDES (Ministry of Digital Economy and Society)
     "block.mdes.go.th",
     "block-mdes.go.th",
+    "mdes.go.th",
+    # Thai ISP block pages — True Online / True Corp
     "warning.trueonline.com",
+    "block.trueonline.com",
+    "warning.truecorp.co.th",
+    # Thai ISP — 3BB
     "blocked.3bb.co.th",
+    "block.3bb.co.th",
+    # Thai ISP — DTAC
     "blockpage.dtac.co.th",
+    # Thai ISP — AIS
     "bfrblock.ais.co.th",
+    "block.ais.co.th",
+    "block.ais.th",
+    # Thai ISP — TOT / NT (National Telecom)
+    "block.tot.co.th",
+    "block.ntplc.co.th",
+    # Malaysia MCMC
     "block.mcmc.gov.my",
     "sekatan.mcmc.gov.my",
+    # Singapore IMDA
+    "block.imda.gov.sg",
 ]
 
 CHALLENGE_STRONG_KEYWORDS = [
@@ -113,6 +143,16 @@ def normalize_domain(raw: str) -> str:
     return host
 
 
+def _parse_expected_status(comment: str) -> str:
+    """Extract expected status from a comment like '# expected:active | ...'."""
+    comment = comment.strip().lstrip("#").strip()
+    if comment.lower().startswith("expected:"):
+        tag = comment[len("expected:"):].split("|")[0].strip().lower()
+        if tag in ("active", "banned", "backup"):
+            return tag
+    return ""
+
+
 def load_domains(list_file) -> list[str]:
     """Load and deduplicate domains from a text file.
 
@@ -130,6 +170,32 @@ def load_domains(list_file) -> list[str]:
             seen.add(domain)
             domains.append(domain)
     return domains
+
+
+def load_domains_with_expected(list_file) -> list[tuple[str, str]]:
+    """Load domains with their expected status annotations.
+
+    Returns list of (domain, expected_status) tuples.
+    expected_status is 'active', 'banned', 'backup', or '' if not annotated.
+    """
+    from pathlib import Path
+    list_file = Path(list_file)
+    if not list_file.exists():
+        return []
+    seen: set[str] = set()
+    results: list[tuple[str, str]] = []
+    for line in list_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Split domain from inline comment
+        parts = stripped.split("#", 1)
+        domain = normalize_domain(parts[0])
+        expected = _parse_expected_status(parts[1]) if len(parts) > 1 else ""
+        if domain and domain not in seen:
+            seen.add(domain)
+            results.append((domain, expected))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +242,58 @@ def is_block_code(http_code: str) -> bool:
     return False
 
 
+def is_cloudflare_waf(headers_text: str, body_preview: str, http_code: str) -> bool:
+    """Detect Cloudflare WAF/protection pages (not ISP blocks).
+
+    Cloudflare 403/503 with CF headers means the origin site has WAF rules,
+    NOT that an ISP is blocking it. This is an important distinction —
+    WAF blocks happen globally, ISP blocks are country-specific.
+    """
+    h = (headers_text or "").lower()
+    b = (body_preview or "").lower()
+    is_cf = "cf-ray" in h or "server: cloudflare" in h
+    if not is_cf:
+        return False
+    # Cloudflare error pages (52x/53x) = origin is down, not ISP block
+    if http_code in {"520", "521", "522", "523", "524", "525", "526", "530"}:
+        return True
+    # Cloudflare 403 with challenge or firewall page = WAF, not ISP
+    if http_code == "403" and ("cloudflare" in b or "ray id" in b):
+        return True
+    return False
+
+
+def is_domain_down(http_code: str, headers_text: str, body_preview: str) -> bool:
+    """Detect if a domain is genuinely down/expired vs ISP-blocked.
+
+    Returns True if the evidence suggests the domain itself is broken
+    (expired, no hosting, DNS error) rather than being actively blocked.
+    """
+    b = (body_preview or "").lower()
+    # Common parking/expired domain indicators
+    parking_keywords = [
+        "this domain is for sale",
+        "domain has expired",
+        "domain is parked",
+        "buy this domain",
+        "this webpage is parked",
+        "godaddy",
+        "namecheap parking",
+        "domain parking",
+        "is registered at",
+        "hugedomains",
+        "dan.com",
+        "sedo.com",
+        "afternic",
+        "this site is under construction",
+        "coming soon",
+        "website coming soon",
+    ]
+    if any(k in b for k in parking_keywords):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Redirect / lander helpers
 # ---------------------------------------------------------------------------
@@ -207,6 +325,30 @@ def has_ready_lander_hint(body_preview: str) -> bool:
         'url=/lander',
     ]
     return any(pattern in body_low for pattern in lander_patterns)
+
+
+def is_sibling_domain_redirect(original_domain: str, final_domain: str) -> bool:
+    """Detect redirect from one membersite domain to another sibling domain.
+
+    If uea8th8.com redirects to uea8th9.com, the original domain is banned
+    and has been replaced. Both domains belong to the same brand.
+    """
+    orig = normalize_hostname(original_domain)
+    final = normalize_hostname(final_domain)
+    if not orig or not final:
+        return False
+    # Strip www. for comparison
+    if orig.startswith("www."):
+        orig = orig[4:]
+    if final.startswith("www."):
+        final = final[4:]
+    if orig == final:
+        return False
+    # Both domains belong to the same brand family
+    brand_prefixes = ["uea8", "ueabet"]
+    orig_is_brand = any(orig.startswith(p) or orig.split(".")[0].startswith(p) for p in brand_prefixes)
+    final_is_brand = any(final.startswith(p) or final.split(".")[0].startswith(p) for p in brand_prefixes)
+    return orig_is_brand and final_is_brand
 
 
 def is_error_redirect_target(effective_url: str, original_domain: str) -> bool:

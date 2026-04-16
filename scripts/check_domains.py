@@ -23,11 +23,15 @@ from classify import (
     extract_title,
     is_block_code,
     is_block_page_host,
+    is_cloudflare_waf,
+    is_domain_down,
     is_error_redirect_target,
     is_ready_redirect_target,
     is_same_domain_or_www,
+    is_sibling_domain_redirect,
     is_valid_domain,
     load_domains,
+    load_domains_with_expected,
     looks_like_real_page,
     normalize_domain,
     normalize_hostname,
@@ -244,6 +248,10 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
         # Redirect landing on a block page is a ban signal, not a generic error.
         if body_has_block or is_block_page_host(probe.final_hostname):
             return AttemptOutcome("block", "BLOCK_REDIRECT", code)
+        # Redirect to another sibling domain (e.g. uea8th8.com → uea8th9.com)
+        # means the original domain is banned and replaced.
+        if is_sibling_domain_redirect(target_domain, probe.final_hostname):
+            return AttemptOutcome("block", "SIBLING_REDIRECT", code)
         return AttemptOutcome("error", "ERROR_REDIRECT", code)
 
     if body_has_block:
@@ -258,8 +266,17 @@ def classify_probe(target_domain: str, probe: ProbeResult) -> AttemptOutcome:
     ):
         return AttemptOutcome("challenge", "CHALLENGE_PAGE", code)
 
+    # Cloudflare WAF 403/52x is NOT an ISP block — it's origin-side protection.
+    # Classify as suspect (WAF) rather than block so it doesn't inflate BAN count.
+    if is_cloudflare_waf(probe.headers, probe.body_preview, code):
+        return AttemptOutcome("suspect", "WAF_BLOCK", code)
+
     if is_block_code(code):
         return AttemptOutcome("block", "HTTP_BLOCK", code)
+
+    # Domain is parked/expired/for-sale — not an ISP ban, domain is just down
+    if is_domain_down(code, probe.headers, probe.body_preview):
+        return AttemptOutcome("down", "DOMAIN_DOWN", code)
 
     code_ok = re.fullmatch(r"\d{3}", code) and 200 <= int(code) <= 399
     host_match = _domain_match_signal(target_domain, probe.effective_url)
@@ -355,6 +372,8 @@ def check_country(
         suspect_count = 0
         no_http_response_count = 0
         error_redirect_count = 0
+        waf_count = 0
+        down_count = 0
 
         for attempt_i in range(attempts):
             out = probe_with_retries(domain, f"https://{domain}")
@@ -373,6 +392,8 @@ def check_country(
                 block_count += 1
             elif out.kind == "challenge":
                 challenge_count += 1
+            elif out.kind == "down":
+                down_count += 1
             elif out.kind == "network":
                 network_count += 1
             elif out.kind == "error":
@@ -384,6 +405,8 @@ def check_country(
                 else:
                     suspect_count += 1
             else:
+                if out.reason == "WAF_BLOCK":
+                    waf_count += 1
                 suspect_count += 1
 
             if out.kind in {"network", "suspect", "error"}:
@@ -484,6 +507,12 @@ def check_country(
         elif any(o.reason == "TLS_FAIL" for o in outcomes) and control_ok_count >= required_success:
             status = "SUSPECT"
             reason = "TLS_FAIL"
+        elif down_count >= required_success:
+            status = "DOWN"
+            reason = "DOMAIN_DOWN"
+        elif waf_count >= required_success:
+            status = "SUSPECT"
+            reason = "WAF_BLOCK"
         elif challenge_count >= required_success:
             status = "SUSPECT"
             reason = "CHALLENGE_PAGE"
