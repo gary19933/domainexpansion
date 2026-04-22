@@ -35,6 +35,10 @@ for var_name in "${required_vars[@]}"; do
 done
 
 cd "$REPO_DIR"
+
+# Pull latest domain lists and scripts from GitHub before running
+git pull --ff-only origin main || echo "WARNING: git pull failed, running with local copy"
+
 mkdir -p out records
 
 RUN_DATE="$(TZ=Asia/Kuala_Lumpur date '+%Y-%m-%d')"

@@ -50,6 +50,35 @@ from classify import (
 
 GLOBAL_DNS = ["8.8.8.8", "1.1.1.1"]
 
+def _is_bogon_ip(ip: str) -> bool:
+    """Return True if the IP is a dead/loopback/private address.
+
+    ISPs in MY/TH/NP return these when DNS-poisoning a domain:
+      - 0.0.0.0 / 127.0.0.1 — explicit null/loopback
+      - 10.x, 172.16-31.x, 192.168.x — RFC1918 private (ISP internal block page)
+      - 169.254.x — link-local (APIPA)
+    Any of these from an ISP resolver for a domain that resolves publicly = poisoned.
+    """
+    _EXACT = {"0.0.0.0", "127.0.0.1", "::1", "::"}
+    if ip in _EXACT:
+        return True
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        o = [int(p) for p in parts]
+    except ValueError:
+        return False
+    if o[0] == 10:
+        return True
+    if o[0] == 172 and 16 <= o[1] <= 31:
+        return True
+    if o[0] == 192 and o[1] == 168:
+        return True
+    if o[0] == 169 and o[1] == 254:
+        return True
+    return False
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
@@ -252,6 +281,12 @@ def check_dns(domain: str, local_resolvers: list[str], global_resolvers: list[st
     result.local_ips = sorted(local_ips)
     result.global_ips = sorted(global_ips)
 
+    # ISP returned only dead/private IPs — fast-path poisoning (Gemini: 100% banned)
+    if local_ips and all(_is_bogon_ip(ip) for ip in local_ips):
+        result.signal = "DNS_POISONED"
+        result.detail = f"ISP DNS returned dead/private IPs: {sorted(local_ips)}"
+        return result
+
     # No global resolution — domain may not exist
     if not global_ips:
         if not local_ips:
@@ -291,18 +326,59 @@ def check_dns(domain: str, local_resolvers: list[str], global_resolvers: list[st
 # TLS / SNI Layer
 # ---------------------------------------------------------------------------
 
-def check_tls_sni(ip: str, domain: str, port: int = 443, timeout: float = 10.0) -> TlsResult:
-    """TLS layer: attempt TLS handshake with SNI to detect SNI-based blocking."""
+def _tls_attempt(
+    ip: str, domain: str, port: int, timeout: float, send_sni: bool
+) -> TlsResult:
+    """Single TLS connection attempt with or without SNI.
+
+    TCP connect and TLS handshake are separated into distinct phases so we can
+    tell the difference between an IP-level block (firewall drops the TCP SYN)
+    and an SNI/DPI block (TCP succeeds but the handshake is killed or stalled).
+    """
     result = TlsResult()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+
+    # ── Phase 1: TCP connect ────────────────────────────────────────────────
+    # A timeout here means the IP itself is unreachable/blacklisted (IP block).
+    # A reset/refused here means the port is actively closed.
     try:
-        ctx = ssl.create_default_context()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
+        sock.connect((ip, port))
+    except socket.timeout:
+        result.signal = "IP_BLOCKED"
+        result.cert_match = False
+        result.detail = f"TCP connect to {ip}:{port} timed out — IP-level block"
         try:
-            sock.connect((ip, port))
-            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+            sock.close()
+        except Exception:
+            pass
+        return result
+    except OSError as e:
+        result.signal = "TLS_ERROR"
+        result.cert_match = False
+        result.detail = f"TCP connect failed: {e}"
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return result
+
+    # ── Phase 2: TLS handshake (TCP succeeded) ──────────────────────────────
+    # A timeout or reset here is SNI/DPI-specific — the firewall reads the
+    # domain name from the ClientHello and stalls or kills the connection.
+    if send_sni:
+        ctx = ssl.create_default_context()
+    else:
+        # No SNI: DPI firewall cannot read the hostname from the ClientHello
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    try:
+        sni_hostname = domain if send_sni else None
+        with ctx.wrap_socket(sock, server_hostname=sni_hostname) as ssock:
+            if send_sni:
                 cert = ssock.getpeercert()
-                # Verify domain is in certificate SANs
                 san_domains: set[str] = set()
                 for san_type, san_value in cert.get("subjectAltName", []):
                     if san_type == "DNS":
@@ -314,7 +390,6 @@ def check_tls_sni(ip: str, domain: str, port: int = 443, timeout: float = 10.0) 
                     if san == domain_lower:
                         cert_match = True
                         break
-                    # Wildcard matching: *.example.com matches sub.example.com
                     if san.startswith("*.") and domain_lower.endswith(san[1:]):
                         cert_match = True
                         break
@@ -325,20 +400,16 @@ def check_tls_sni(ip: str, domain: str, port: int = 443, timeout: float = 10.0) 
                     result.detail = f"Certificate SANs {sorted(san_domains)} do not match {domain}"
                 else:
                     result.signal = "TLS_OK"
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
-
+            else:
+                result.signal = "TLS_OK"
     except ConnectionResetError:
-        result.signal = "SNI_BLOCKED"
+        result.signal = "SNI_BLOCKED" if send_sni else "TLS_ERROR"
         result.cert_match = False
-        result.detail = "Connection reset during TLS handshake (SNI block)"
+        result.detail = "Connection reset during TLS handshake (DPI/SNI filter)"
     except socket.timeout:
-        result.signal = "SNI_TIMEOUT"
+        result.signal = "SNI_TIMEOUT" if send_sni else "TLS_ERROR"
         result.cert_match = False
-        result.detail = "TLS handshake timed out"
+        result.detail = "TLS handshake stalled — possible DPI interference"
     except ssl.SSLCertVerificationError as e:
         result.signal = "TLS_MITM"
         result.cert_match = False
@@ -350,7 +421,32 @@ def check_tls_sni(ip: str, domain: str, port: int = 443, timeout: float = 10.0) 
     except OSError as e:
         result.signal = "TLS_ERROR"
         result.cert_match = False
-        result.detail = f"Connection error: {e}"
+        result.detail = f"TLS connection error: {e}"
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return result
+
+
+def check_tls_sni(ip: str, domain: str, port: int = 443, timeout: float = 10.0) -> TlsResult:
+    """TLS layer: SNI-based blocking detection with IP-direct confirmation.
+
+    First attempts a normal TLS handshake with SNI (domain name in ClientHello).
+    If that fails with a reset or timeout, re-attempts WITHOUT SNI on the same IP.
+    If the no-SNI attempt succeeds, the block is confirmed as SNI/DPI-specific
+    (the firewall is reading the hostname from the handshake and dropping it).
+    """
+    result = _tls_attempt(ip, domain, port, timeout, send_sni=True)
+
+    # SNI failure — confirm it's hostname-specific, not a general connectivity issue
+    if result.signal in ("SNI_BLOCKED", "SNI_TIMEOUT"):
+        no_sni = _tls_attempt(ip, domain, port, timeout / 2, send_sni=False)
+        if no_sni.signal == "TLS_OK":
+            result.signal = "SNI_BLOCKED"
+            result.detail = "SNI block confirmed: direct IP connection succeeds, hostname rejected by DPI"
 
     return result
 
@@ -509,8 +605,10 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
             return "BAN", "high"
 
     # TLS/SNI-level ban
+    if tls.signal == "IP_BLOCKED":
+        return "BAN", "high"   # IP itself is blacklisted at firewall level
     if tls.signal == "SNI_BLOCKED":
-        return "BAN", "high"
+        return "BAN", "high"   # TCP works but DPI kills on hostname
     if tls.signal == "TLS_MITM":
         return "BAN", "high"
 
@@ -532,7 +630,7 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
     if http.signal == "HTTP_WAF":
         return "SUSPECT", "medium"
 
-    # Infrastructure issues — all layers timing out
+    # Infrastructure issues — all layers timing out (IP_BLOCKED already returned above)
     timeout_signals = {"DNS_TIMEOUT", "SNI_TIMEOUT", "HTTP_TIMEOUT"}
     error_signals = {"TLS_ERROR", "HTTP_ERROR", "HTTP_REDIRECT_LOOP"}
     all_signals = {dns.signal, tls.signal, http.signal}

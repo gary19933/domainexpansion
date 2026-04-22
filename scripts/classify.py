@@ -44,9 +44,17 @@ BLOCK_KEYWORDS = [
     "laman web ini disekat",
     "disekat oleh",
     "suruhanjaya komunikasi dan multimedia",
+    "sekatan",           # MCMC — "restriction/barrier" (Gemini: high-signal MCMC term)
+    "skmm",              # MCMC abbreviation in Malay
     # Singapore IMDA block page indicators
     "ordered by the",
     "infocommunications media development authority",
+    # Nepal NTA (Nepal Telecommunications Authority) block page indicators
+    "nepal telecommunications authority",
+    "blocked by nta",
+    "nta.gov.np",
+    # Thai — additional access-suspended phrasing (Gemini: ระงับการเข้าถึง)
+    "ระงับการเข้าถึง",  # ระงับการเข้าถึง (access suspended)
 ]
 
 # Known government / ISP block page hostnames.  When curl follows a redirect
@@ -77,6 +85,9 @@ BLOCK_PAGE_HOSTS = [
     "sekatan.mcmc.gov.my",
     # Singapore IMDA
     "block.imda.gov.sg",
+    # Nepal NTA
+    "block.nta.gov.np",
+    "nta.gov.np",
 ]
 
 CHALLENGE_STRONG_KEYWORDS = [
