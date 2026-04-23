@@ -628,6 +628,11 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
     if dns.signal == "DNS_OK" and http.signal == "HTTP_OK":
         return "OK", "medium"
 
+    # DNS clean but both TLS and HTTP unreachable — network-level block.
+    # Domain exists (DNS OK) but no connection method works = ISP blocking.
+    if dns.signal == "DNS_OK" and tls.signal in ("SNI_TIMEOUT", "SNI_BLOCKED") and http.signal == "HTTP_TIMEOUT":
+        return "BAN", "medium"
+
     # Domain is parked/expired — not banned by ISP, the domain itself is down
     if http.signal == "HTTP_DOWN":
         return "DOWN", "high"
