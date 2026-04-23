@@ -47,30 +47,33 @@ RUN_DATE="$(TZ=Asia/Kuala_Lumpur date '+%Y-%m-%d')"
 # VPS node-based countries (MY, SG, TH)
 # SSH host aliases are expected in ~/.ssh/config:
 #   Host my-node / sg-node / th-node
+# Each node just needs the repo cloned at /root/domainexpansion
 # ---------------------------------------------------------------------------
 VPS_COUNTRIES=(my sg th)
-CHECKER_USER="${CHECKER_USER:-checker}"
-CHECKER_SCRIPT="/home/${CHECKER_USER}/checker_node.py"
-CHECKER_CONFIG="/home/${CHECKER_USER}/config.json"
+NODE_USER="root"
+NODE_REPO="/root/domainexpansion"
 
 for country in "${VPS_COUNTRIES[@]}"; do
   node_host="${country}-node"
   echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] VPS check country=$country node=$node_host"
 
-  # Sync domain list to node
-  scp -q "lists/${country}.txt" "${CHECKER_USER}@${node_host}:/home/${CHECKER_USER}/lists/${country}.txt" || {
-    echo "WARNING: failed to sync list to $node_host, skipping"
-    continue
+  # Pull latest lists and scripts on node
+  ssh -o ConnectTimeout=10 "${NODE_USER}@${node_host}" \
+    "cd ${NODE_REPO} && git pull --ff-only origin main" || {
+    echo "WARNING: git pull failed on $node_host, running with existing copy"
   }
 
-  # Trigger check on node
-  ssh -o ConnectTimeout=10 "${CHECKER_USER}@${node_host}" \
-    "python3 ${CHECKER_SCRIPT} --config ${CHECKER_CONFIG} --list /home/${CHECKER_USER}/lists/${country}.txt" || {
+  # Trigger check on node — output to /tmp for easy retrieval
+  ssh -o ConnectTimeout=10 "${NODE_USER}@${node_host}" \
+    "python3 ${NODE_REPO}/scripts/checker_node.py \
+     --config ${NODE_REPO}/deploy/node_configs/${country}.json \
+     --list ${NODE_REPO}/lists/${country}.txt \
+     --output /tmp/${country}_results.json" || {
     echo "WARNING: checker_node.py failed on $node_host"
   }
 
-  # Pull results
-  scp -q "${CHECKER_USER}@${node_host}:/home/${CHECKER_USER}/results/latest.json" \
+  # Pull results back to controller
+  scp -q "${NODE_USER}@${node_host}:/tmp/${country}_results.json" \
     "out/${country}_node_results.json" || {
     echo "WARNING: failed to pull results from $node_host"
   }
