@@ -622,6 +622,12 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
     if dns.signal == "DNS_OK" and tls.signal == "TLS_OK" and http.signal == "HTTP_OK":
         return "OK", "high"
 
+    # HTTP fully accessible despite TLS timeout — domain is reachable.
+    # SNI_TIMEOUT on a specific IP is likely CDN routing, not a block.
+    # HTTP_OK proves the domain responds correctly to a full request.
+    if dns.signal == "DNS_OK" and http.signal == "HTTP_OK":
+        return "OK", "medium"
+
     # Domain is parked/expired — not banned by ISP, the domain itself is down
     if http.signal == "HTTP_DOWN":
         return "DOWN", "high"
