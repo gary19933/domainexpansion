@@ -606,6 +606,9 @@ def aggregate_verdict(dns: DnsResult, tls: TlsResult, http: HttpResult) -> tuple
 
     # TLS/SNI-level ban
     if tls.signal == "IP_BLOCKED":
+        # Specific IP timed out but HTTP still got through via a different CDN IP
+        if dns.signal == "DNS_OK" and http.signal == "HTTP_OK":
+            return "OK", "medium"
         return "BAN", "high"   # IP itself is blacklisted at firewall level
     if tls.signal == "SNI_BLOCKED":
         return "BAN", "high"   # TCP works but DPI kills on hostname
