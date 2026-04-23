@@ -49,7 +49,7 @@ RUN_DATE="$(TZ=Asia/Kuala_Lumpur date '+%Y-%m-%d')"
 #   Host my-node / sg-node / th-node
 # Each node just needs the repo cloned at /root/domainexpansion
 # ---------------------------------------------------------------------------
-VPS_COUNTRIES=(my sg th)
+VPS_COUNTRIES=(my sg th np)
 NODE_USER="root"
 NODE_REPO="/root/domainexpansion"
 
@@ -83,39 +83,8 @@ done
 python3 scripts/collect_results.py \
   --date "$RUN_DATE" \
   --out-dir "out" \
-  --countries "$(IFS=,; echo "${VPS_COUNTRIES[*]}")"
+  --countries "my,sg,th,np"
 
-# ---------------------------------------------------------------------------
-# Proxy-based fallback countries (NP)
-# ---------------------------------------------------------------------------
-PROXY_COUNTRIES=(np)
-COUNTRY_SLEEP_SECONDS="${COUNTRY_SLEEP_SECONDS:-10}"
-
-for i in "${!PROXY_COUNTRIES[@]}"; do
-  country="${PROXY_COUNTRIES[$i]}"
-  upper_country="$(echo "$country" | tr '[:lower:]' '[:upper:]')"
-  proxy_var="RES_PROXY_${upper_country}"
-  proxy_url="${!proxy_var:-}"
-
-  if [[ -z "$proxy_url" ]]; then
-    echo "WARNING: no proxy for $country (${proxy_var} not set), skipping"
-    continue
-  fi
-
-  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] proxy check country=$country"
-  python3 scripts/check_domains.py \
-    --country "$country" \
-    --list-file "lists/${country}.txt" \
-    --log-file "records/ban_log.csv" \
-    --rows-output "out/${country}_rows.csv" \
-    --no-append-log \
-    --date "$RUN_DATE" \
-    --proxy-url "$proxy_url"
-
-  if (( i < ${#PROXY_COUNTRIES[@]} - 1 )) && (( COUNTRY_SLEEP_SECONDS > 0 )); then
-    sleep "$COUNTRY_SLEEP_SECONDS"
-  fi
-done
 
 # ---------------------------------------------------------------------------
 # Merge all results and send Telegram summary
