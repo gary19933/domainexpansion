@@ -3,6 +3,7 @@ import argparse
 import csv
 import re
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -20,6 +21,7 @@ COUNTRY_TITLES = {
 }
 
 LISTS_DIR = Path(__file__).resolve().parent.parent / "lists"
+RECENTLY_BANNED_DAYS = 3
 
 
 def infer_reason(http_code: str, status: str) -> str:
@@ -90,13 +92,51 @@ def append_ban_log(log_file: Path, rows: list[dict[str, str]]) -> None:
             writer.writerow({k: row[k] for k in LOG_FIELDS})
 
 
+def get_recently_banned(
+    log_file: Path,
+    error: dict[str, list[str]],
+    day: str,
+) -> dict[str, list[str]]:
+    today = datetime.strptime(day, "%Y-%m-%d").date()
+    cutoff = today - timedelta(days=RECENTLY_BANNED_DAYS)
+
+    # Find the earliest date each (country, domain) appeared as non-OK in the log
+    first_banned: dict[tuple[str, str], object] = {}
+    if log_file.exists():
+        with log_file.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if (row.get("status") or "").strip() == "OK":
+                    continue
+                key = (
+                    (row.get("country") or "").strip(),
+                    (row.get("domain") or "").strip(),
+                )
+                try:
+                    d = datetime.strptime((row.get("date") or "").strip(), "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if key not in first_banned or d < first_banned[key]:
+                    first_banned[key] = d
+
+    recently: dict[str, list[str]] = {c: [] for c in COUNTRIES}
+    for country in COUNTRIES:
+        for domain in error[country]:
+            key = (country, domain)
+            fd = first_banned.get(key)
+            if fd is not None and fd >= cutoff:
+                recently[country].append(domain)
+        recently[country].sort()
+
+    return recently
+
+
 def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> str:
     # Deduplicate by (country, domain)
     unique_rows: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
         unique_rows[(row["country"], row["domain"])] = row
 
-    # Split into reachable and error, grouped by country
     reachable: dict[str, list[str]] = {c: [] for c in COUNTRIES}
     error: dict[str, list[str]] = {c: [] for c in COUNTRIES}
 
@@ -114,12 +154,15 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
     total_error = sum(len(v) for v in error.values())
     total = total_reachable + total_error
 
+    recently_banned = get_recently_banned(log_file, error, day)
+    total_recently = sum(len(v) for v in recently_banned.values())
+
     lines = [
         "\U0001f4ca Daily Domain Check Report",
         f"Date: {day}",
         "",
         "—" * 6,
-        f"\U0001f7e2 Reachable ({total_reachable})",
+        f"\U0001f7e2 Active ({total_reachable})",
         "—" * 6,
         "",
     ]
@@ -135,7 +178,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
 
     lines += [
         "—" * 6,
-        f"\U0001f534 Error ({total_error})",
+        f"\U0001f534 Banned ({total_error})",
         "—" * 6,
         "",
     ]
@@ -149,11 +192,27 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
             lines.append(f"Domain: {d}")
         lines.append("")
 
+    if total_recently > 0:
+        lines += [
+            "—" * 6,
+            f"\U0001f195 Recently Banned ({total_recently})",
+            "—" * 6,
+            "",
+        ]
+        for country in COUNTRIES:
+            domains = recently_banned[country]
+            if not domains:
+                continue
+            lines.append(f"{COUNTRY_TITLES[country]} ({len(domains)})")
+            for d in domains:
+                lines.append(f"Domain: {d}")
+            lines.append("")
+
     lines += [
         "—" * 6,
         f"Total: {total}",
-        f"\U0001f7e2 Reachable: {total_reachable}",
-        f"\U0001f534 Errors: {total_error}",
+        f"\U0001f7e2 Active: {total_reachable}",
+        f"\U0001f534 Banned: {total_error}",
     ]
 
     text = "\n".join(lines)
