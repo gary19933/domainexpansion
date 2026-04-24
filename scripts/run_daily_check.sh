@@ -65,8 +65,10 @@ run_country() {
     --country "$country" \
     --output "/tmp/${country}_active.txt"
 
+  SSH_OPTS="-o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
+
   # Pull latest lists and scripts on node
-  ssh -o ConnectTimeout=10 "${NODE_USER}@${node_host}" \
+  ssh $SSH_OPTS "${NODE_USER}@${node_host}" \
     "cd ${NODE_REPO} && git pull --ff-only origin main" || {
     echo "WARNING: git pull failed on $node_host, running with existing copy"
   }
@@ -77,14 +79,28 @@ run_country() {
     echo "WARNING: failed to copy filtered list to $node_host"
   }
 
-  # Trigger check on node using filtered list
-  ssh -o ConnectTimeout=10 "${NODE_USER}@${node_host}" \
-    "python3 ${NODE_REPO}/scripts/checker_node.py \
+  # Start checker in background on node via nohup so it survives SSH drops
+  ssh $SSH_OPTS "${NODE_USER}@${node_host}" \
+    "nohup python3 ${NODE_REPO}/scripts/checker_node.py \
      --config ${NODE_REPO}/deploy/node_configs/${country}.json \
      --list /tmp/${country}_active.txt \
-     --output /tmp/${country}_results.json" || {
-    echo "WARNING: checker_node.py failed on $node_host"
+     --output /tmp/${country}_results.json \
+     > /tmp/${country}_check.log 2>&1 &" || {
+    echo "WARNING: failed to start checker on $node_host"
   }
+
+  # Wait for results file to appear (poll every 30s, timeout 90min)
+  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] waiting for $node_host results..."
+  WAIT_SECS=0
+  until ssh $SSH_OPTS "${NODE_USER}@${node_host}" \
+      "test -f /tmp/${country}_results.json" 2>/dev/null; do
+    sleep 30
+    WAIT_SECS=$((WAIT_SECS + 30))
+    if (( WAIT_SECS >= 5400 )); then
+      echo "WARNING: timeout waiting for results from $node_host"
+      break
+    fi
+  done
 
   # Pull results back to controller
   scp -q "${NODE_USER}@${node_host}:/tmp/${country}_results.json" \
