@@ -92,46 +92,33 @@ def append_ban_log(log_file: Path, rows: list[dict[str, str]]) -> None:
             writer.writerow({k: row[k] for k in LOG_FIELDS})
 
 
-def get_recently_banned(
-    log_file: Path,
-    error: dict[str, list[str]],
-    day: str,
-) -> dict[str, list[str]]:
+def get_recently_banned(banned_file: Path, day: str) -> dict[str, list[str]]:
     today = datetime.strptime(day, "%Y-%m-%d").date()
     cutoff = today - timedelta(days=RECENTLY_BANNED_DAYS)
 
-    # Find the earliest date each (country, domain) appeared as non-OK in the log
-    first_banned: dict[tuple[str, str], object] = {}
-    if log_file.exists():
-        with log_file.open("r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if (row.get("status") or "").strip() == "OK":
-                    continue
-                key = (
-                    (row.get("country") or "").strip(),
-                    (row.get("domain") or "").strip(),
-                )
-                try:
-                    d = datetime.strptime((row.get("date") or "").strip(), "%Y-%m-%d").date()
-                except ValueError:
-                    continue
-                if key not in first_banned or d < first_banned[key]:
-                    first_banned[key] = d
-
     recently: dict[str, list[str]] = {c: [] for c in COUNTRIES}
-    for country in COUNTRIES:
-        for domain in error[country]:
-            key = (country, domain)
-            fd = first_banned.get(key)
-            if fd is not None and fd >= cutoff:
+    if not banned_file.exists():
+        return recently
+
+    with banned_file.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                d = datetime.strptime((row.get("date_banned") or "").strip(), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            country = (row.get("country") or "").strip()
+            domain = (row.get("domain") or "").strip()
+            if country in COUNTRIES and domain and cutoff <= d <= today:
                 recently[country].append(domain)
-        recently[country].sort()
+
+    for c in COUNTRIES:
+        recently[c] = sorted(set(recently[c]))
 
     return recently
 
 
-def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> str:
+def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path, banned_file: Path | None = None) -> str:
     # Deduplicate by (country, domain)
     unique_rows: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
@@ -154,7 +141,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path) -> 
     total_error = sum(len(v) for v in error.values())
     total = total_reachable + total_error
 
-    recently_banned = get_recently_banned(log_file, error, day)
+    recently_banned = get_recently_banned(banned_file or log_file.parent / "banned_domains.csv", day)
     total_recently = sum(len(v) for v in recently_banned.values())
 
     lines = [
@@ -229,6 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--summary-file", type=Path, default=Path("out/telegram_daily_summary.txt")
     )
+    parser.add_argument("--banned-file", type=Path, default=Path("records/banned_domains.csv"))
     return parser.parse_args()
 
 
@@ -236,7 +224,7 @@ def main() -> None:
     args = parse_args()
     rows = load_country_rows(args.out_dir, args.date)
     append_ban_log(args.log_file, rows)
-    summary = build_summary_text(rows, args.date, args.log_file)
+    summary = build_summary_text(rows, args.date, args.log_file, args.banned_file)
     args.summary_file.parent.mkdir(parents=True, exist_ok=True)
     args.summary_file.write_text(summary, encoding="utf-8")
     print(f"rows={len(rows)} summary_file={args.summary_file}")

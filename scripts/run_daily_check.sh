@@ -44,9 +44,9 @@ mkdir -p out records
 RUN_DATE="$(TZ=Asia/Kuala_Lumpur date '+%Y-%m-%d')"
 
 # ---------------------------------------------------------------------------
-# VPS node-based countries (MY, SG, TH)
+# VPS node-based countries (MY, SG, TH, NP)
 # SSH host aliases are expected in ~/.ssh/config:
-#   Host my-node / sg-node / th-node
+#   Host my-node / sg-node / th-node / np-node
 # Each node just needs the repo cloned at /root/domainexpansion
 # ---------------------------------------------------------------------------
 VPS_COUNTRIES=(my sg th np)
@@ -57,17 +57,30 @@ for country in "${VPS_COUNTRIES[@]}"; do
   node_host="${country}-node"
   echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] VPS check country=$country node=$node_host"
 
+  # Filter out already-banned domains before checking
+  python3 scripts/filter_list.py \
+    --list "lists/${country}.txt" \
+    --banned-file "records/banned_domains.csv" \
+    --country "$country" \
+    --output "/tmp/${country}_active.txt"
+
   # Pull latest lists and scripts on node
   ssh -o ConnectTimeout=10 "${NODE_USER}@${node_host}" \
     "cd ${NODE_REPO} && git pull --ff-only origin main" || {
     echo "WARNING: git pull failed on $node_host, running with existing copy"
   }
 
-  # Trigger check on node — output to /tmp for easy retrieval
+  # Copy filtered active list to node
+  scp -q "/tmp/${country}_active.txt" \
+    "${NODE_USER}@${node_host}:/tmp/${country}_active.txt" || {
+    echo "WARNING: failed to copy filtered list to $node_host"
+  }
+
+  # Trigger check on node using filtered list
   ssh -o ConnectTimeout=10 "${NODE_USER}@${node_host}" \
     "python3 ${NODE_REPO}/scripts/checker_node.py \
      --config ${NODE_REPO}/deploy/node_configs/${country}.json \
-     --list ${NODE_REPO}/lists/${country}.txt \
+     --list /tmp/${country}_active.txt \
      --output /tmp/${country}_results.json" || {
     echo "WARNING: checker_node.py failed on $node_host"
   }
@@ -85,6 +98,11 @@ python3 scripts/collect_results.py \
   --out-dir "out" \
   --countries "my,sg,th,np"
 
+# Record newly banned domains
+python3 scripts/auto_ban.py \
+  --date "$RUN_DATE" \
+  --out-dir "out" \
+  --banned-file "records/banned_domains.csv"
 
 # ---------------------------------------------------------------------------
 # Merge all results and send Telegram summary
@@ -93,6 +111,7 @@ python3 scripts/merge_summary.py \
   --date "$RUN_DATE" \
   --out-dir "out" \
   --log-file "records/ban_log.csv" \
+  --banned-file "records/banned_domains.csv" \
   --summary-file "out/telegram_daily_summary.txt"
 
 if [[ ! -s out/telegram_daily_summary.txt ]]; then
