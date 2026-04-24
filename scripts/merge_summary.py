@@ -128,7 +128,7 @@ def build_summary_text(rows: list[dict[str, str]], day: str, log_file: Path, ban
     error: dict[str, list[str]] = {c: [] for c in COUNTRIES}
 
     for (country, domain), row in unique_rows.items():
-        if row["status"] == "OK":
+        if row["status"] == "OK" or row["status"] == "SUSPECT":
             reachable[country].append(domain)
         else:
             error[country].append(domain)
