@@ -79,6 +79,10 @@ run_country() {
     echo "WARNING: failed to copy filtered list to $node_host"
   }
 
+  # Clean up old results before starting fresh check
+  ssh $SSH_OPTS "${NODE_USER}@${node_host}" \
+    "pkill -f checker_node.py 2>/dev/null; rm -f /tmp/${country}_results.json" || true
+
   # Start checker in background on node via nohup so it survives SSH drops
   ssh $SSH_OPTS "${NODE_USER}@${node_host}" \
     "nohup python3 ${NODE_REPO}/scripts/checker_node.py \
