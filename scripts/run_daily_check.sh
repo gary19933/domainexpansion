@@ -53,8 +53,9 @@ VPS_COUNTRIES=(my sg th np)
 NODE_USER="root"
 NODE_REPO="/root/domainexpansion"
 
-for country in "${VPS_COUNTRIES[@]}"; do
-  node_host="${country}-node"
+run_country() {
+  local country="$1"
+  local node_host="${country}-node"
   echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] VPS check country=$country node=$node_host"
 
   # Filter out already-banned domains before checking
@@ -90,7 +91,15 @@ for country in "${VPS_COUNTRIES[@]}"; do
     "out/${country}_node_results.json" || {
     echo "WARNING: failed to pull results from $node_host"
   }
+
+  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] done country=$country"
+}
+
+# Run all country checks in parallel
+for country in "${VPS_COUNTRIES[@]}"; do
+  run_country "$country" &
 done
+wait  # wait for all 4 to finish
 
 # Convert VPS node results to CSV
 python3 scripts/collect_results.py \
