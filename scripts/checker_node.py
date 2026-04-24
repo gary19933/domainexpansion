@@ -749,19 +749,18 @@ def check_domain(
         r = check_domain_once(domain, country, node_id, local_resolvers, global_resolvers)
         results.append(r)
 
-        # Early exit on confident results — no need for more attempts
-        if r.verdict == "BAN" and r.confidence == "high":
-            break
-        if r.verdict == "OK" and r.confidence == "high":
-            break
-
         if attempt_i < attempts - 1:
             time.sleep(1.0)
 
-    # Majority voting on verdict
+    # Majority voting across all attempts
     from collections import Counter
     verdict_counts = Counter(r.verdict for r in results)
     majority_verdict = verdict_counts.most_common(1)[0][0]
+
+    # If any attempt detected TLS_MITM, trust that signal — it's never a false positive
+    if any(getattr(r, "tls", None) and r.tls.signal == "TLS_MITM" for r in results):
+        mitm_results = [r for r in results if getattr(r, "tls", None) and r.tls.signal == "TLS_MITM"]
+        return mitm_results[0]
 
     # Pick the result that matches the majority verdict (prefer high confidence)
     matching = [r for r in results if r.verdict == majority_verdict]
