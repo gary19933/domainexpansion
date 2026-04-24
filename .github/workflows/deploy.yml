@@ -1,0 +1,21 @@
+name: Deploy - Pull latest on all nodes
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull latest on controller and all country nodes
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 38.54.112.115
+          username: root
+          key: ${{ secrets.CONTROLLER_SSH_KEY }}
+          script: |
+            cd /root/domainexpansion && git pull --ff-only origin main
+            for node in my-node sg-node th-node np-node; do
+              ssh $node "cd /root/domainexpansion && git pull --ff-only origin main" || echo "WARNING: pull failed on $node"
+            done
