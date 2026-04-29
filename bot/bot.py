@@ -182,6 +182,53 @@ async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Added: {country} {domain}")
 
 
+async def import_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    allow_users: set[int] = context.bot_data["allow_users"]
+    cfg: RepoConfig = context.bot_data["repo_cfg"]
+    if not is_authorized(update, allow_users):
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /import <country> <domain1> <domain2> ...")
+        return
+
+    country = context.args[0].lower()
+    if country not in ALLOWED_COUNTRIES:
+        await update.message.reply_text("Invalid country. Use: my, sg, th, np")
+        return
+
+    user_id = update.effective_user.id
+    domains, sha = get_domains(cfg, country)
+    existing = set(domains)
+
+    added = []
+    skipped = []
+    invalid = []
+    for raw in context.args[1:]:
+        domain = normalize_domain(raw)
+        if not domain:
+            invalid.append(raw)
+        elif domain in existing:
+            skipped.append(domain)
+        else:
+            domains.append(domain)
+            existing.add(domain)
+            added.append(domain)
+
+    if added:
+        put_domains(cfg, country, domains, sha, user_id, "import", ",".join(added))
+
+    lines = []
+    if added:
+        lines.append(f"Added ({len(added)}): {', '.join(added)}")
+    if skipped:
+        lines.append(f"Already exists ({len(skipped)}): {', '.join(skipped)}")
+    if invalid:
+        lines.append(f"Invalid ({len(invalid)}): {', '.join(invalid)}")
+    await update.message.reply_text("\n".join(lines) if lines else "Nothing to import.")
+
+
 async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     allow_users: set[int] = context.bot_data["allow_users"]
     cfg: RepoConfig = context.bot_data["repo_cfg"]
@@ -233,6 +280,7 @@ def main() -> None:
     app.add_handler(CommandHandler("countries", countries_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("add", add_cmd))
+    app.add_handler(CommandHandler("import", import_cmd))
     app.add_handler(CommandHandler("remove", remove_cmd))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
